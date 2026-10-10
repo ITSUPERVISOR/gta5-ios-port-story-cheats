@@ -1,0 +1,6 @@
+Tools/
+Generated/
+Build/
+Resources/manifest.json
+*.xcuserstate
+xcuserdata/

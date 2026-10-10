@@ -1,0 +1,92 @@
+--- a/src/dawn/native/metal/CommandBufferMTL.mm
++++ b/src/dawn/native/metal/CommandBufferMTL.mm
+@@ -26,6 +26,8 @@
+ // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ 
+ #include "src/dawn/native/metal/CommandBufferMTL.h"
++#include <cstdlib>
++#include "src/dawn/native/metal/PlayGTA5MetalBufferCache.h"
+ 
+ #include <tint/tint.h>
+ 
+@@ -680,11 +682,22 @@
+     BindGroupTracker(StorageBufferLengthTracker* lengthTracker, bool useArgumentBuffers)
+         : BindGroupTrackerBase(),
+           mLengthTracker(lengthTracker),
+-          mUseArgumentBuffers(useArgumentBuffers) {}
++          mUseArgumentBuffers(useArgumentBuffers),
++          mCacheBufferOffsets(std::getenv("PG_REFERENCE_METAL_BUFFER_OFFSETS") == nullptr) {}
+ 
+     template <typename Encoder>
+     void Apply(Encoder encoder) {
+         BeforeApply();
++
++        // PlayGTA5: vertex inputs are packed after the current layout's buffers.
++        // A layout switch can make them overwrite a former bind-group index.
++        auto* currentLayout = ToBackend(mPipeline->GetLayout());
++        if (mCachedBufferLayout != currentLayout) {
++            for (auto stage : IterateStages(kAllStages)) {
++                mBoundBuffers[stage].Clear();
++            }
++            mCachedBufferLayout = currentLayout;
++        }
+ 
+         uint32_t curBufferIdx = kArgumentBufferSlotMax;
+         for (BindGroupIndex index : mDirtyBindGroupsObjectChangedOrIsDynamic) {
+@@ -811,19 +824,34 @@
+                         }
+ 
+                         if (hasVertStage) {
+-                            [render setVertexBuffers:&buffer
+-                                             offsets:&offset
+-                                           withRange:NSMakeRange(vertIndex, 1)];
++                            auto change = mCacheBufferOffsets
++                                ? mBoundBuffers[SingleShaderStage::Vertex].Update(vertIndex, buffer, offset)
++                                : playgta5::MetalBufferChange::Bind;
++                            if (change == playgta5::MetalBufferChange::Bind) {
++                                [render setVertexBuffers:&buffer offsets:&offset withRange:NSMakeRange(vertIndex, 1)];
++                            } else if (change == playgta5::MetalBufferChange::Offset) {
++                                [render setVertexBufferOffset:offset atIndex:vertIndex];
++                            }
+                         }
+                         if (hasFragStage) {
+-                            [render setFragmentBuffers:&buffer
+-                                               offsets:&offset
+-                                             withRange:NSMakeRange(fragIndex, 1)];
++                            auto change = mCacheBufferOffsets
++                                ? mBoundBuffers[SingleShaderStage::Fragment].Update(fragIndex, buffer, offset)
++                                : playgta5::MetalBufferChange::Bind;
++                            if (change == playgta5::MetalBufferChange::Bind) {
++                                [render setFragmentBuffers:&buffer offsets:&offset withRange:NSMakeRange(fragIndex, 1)];
++                            } else if (change == playgta5::MetalBufferChange::Offset) {
++                                [render setFragmentBufferOffset:offset atIndex:fragIndex];
++                            }
+                         }
+                         if (hasComputeStage) {
+-                            [compute setBuffers:&buffer
+-                                        offsets:&offset
+-                                      withRange:NSMakeRange(computeIndex, 1)];
++                            auto change = mCacheBufferOffsets
++                                ? mBoundBuffers[SingleShaderStage::Compute].Update(computeIndex, buffer, offset)
++                                : playgta5::MetalBufferChange::Bind;
++                            if (change == playgta5::MetalBufferChange::Bind) {
++                                [compute setBuffers:&buffer offsets:&offset withRange:NSMakeRange(computeIndex, 1)];
++                            } else if (change == playgta5::MetalBufferChange::Offset) {
++                                [compute setBufferOffset:offset atIndex:computeIndex];
++                            }
+                         }
+                     }
+                 },
+@@ -925,7 +953,12 @@
+     PerStage<absl::flat_hash_map<uint32_t, id<MTLTexture>>> mBoundTextures;
+     PerStage<absl::flat_hash_map<uint32_t, id<MTLSamplerState>>> mBoundSamplers;
+ 
++    // Metal retains bound buffers for this encoder. The cache follows the same
++    // lifetime as the existing texture/sampler caches and never owns GPU objects.
++    PerStage<playgta5::MetalBufferCache<id<MTLBuffer>, kGenericMetalBufferSlots>> mBoundBuffers;
++    PipelineLayout* mCachedBufferLayout = nullptr;
+     bool mUseArgumentBuffers = false;
++    bool mCacheBufferOffsets = true;
+ };
+ 
+ // Keeps track of the dirty vertex buffer values so they can be lazily applied when we know

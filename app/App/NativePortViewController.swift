@@ -1,0 +1,531 @@
+import UIKit
+import MetalKit
+import GameController
+import AVFAudio
+
+private func engineLog(_ message: UnsafePointer<CChar>?, _ context: UnsafeMutableRawPointer?) {
+    guard let message, let context else { return }
+    let line = String(cString: message)
+    let controller = Unmanaged<NativePortViewController>.fromOpaque(context).takeUnretainedValue()
+    DispatchQueue.main.async { controller.appendLog(line) }
+}
+
+final class NativePortViewController: UIViewController, MTKViewDelegate {
+    private var metalView: MTKView!
+    private var queue: MTLCommandQueue?
+    private let output = UITextView()
+    private let controllerLabel = UILabel()
+    private let fpsLabel = UILabel()
+    private var lastFPSLabelUpdate: CFTimeInterval = 0
+    private let launchButton = UIButton(type: .system)
+    private let audioEngine = AVAudioEngine()
+    private var audioSource: AVAudioSourceNode?
+    private var displayLink: CADisplayLink?
+    private var lastControllerPoll: CFTimeInterval?
+    private var lines: [String] = []
+    private var metrics: [String: String] = [:]
+    private var logFile: URL?
+    private let touchControls = TouchControlsView(frame: .zero)
+    private let gyro = GyroInput()
+    private let settingsButton = UIButton(type: .system)
+    private let serverButton = UIButton(type: .system)
+    private var engineStarted = false
+    private var bootedPreset = GameSettings.shared.graphicsPreset
+    private var stableTimer: Timer?
+    private var padProof: PGPadState?
+    private var tiltNeutral: Double?
+    private var tiltSince: CFTimeInterval?
+    private var tiltSmoothed: Double = 0
+    private var touchControlsAvailable = false
+    private var lastTouchInputTrace = ""
+    private var movementProofStarted = false
+    private var proofController: GCController?
+    private var proofInputSamples = 0
+    private var proofInputActive = false
+    private var diagnosticsOverlay: UIStackView?
+    #if targetEnvironment(simulator)
+    private var simulatorKeys = Set<UIKeyboardHIDUsage>()
+    override var canBecomeFirstResponder: Bool { true }
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        becomeFirstResponder()
+    }
+    override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        for press in presses { if let key = press.key { simulatorKeys.insert(key.keyCode) } }
+        super.pressesBegan(presses, with: event)
+    }
+    override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        for press in presses { if let key = press.key { simulatorKeys.remove(key.keyCode) } }
+        super.pressesEnded(presses, with: event)
+    }
+    override func pressesCancelled(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        simulatorKeys.removeAll()
+        super.pressesCancelled(presses, with: event)
+    }
+    #endif
+
+    override var prefersStatusBarHidden: Bool { true }
+    override var supportedInterfaceOrientations: UIInterfaceOrientationMask { .landscape }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        UIApplication.shared.isIdleTimerDisabled = true
+        let device = MTLCreateSystemDefaultDevice()
+        metalView = MTKView(frame: .zero, device: device)
+        queue = device?.makeCommandQueue()
+        metalView.delegate = self
+        metalView.clearColor = MTLClearColorMake(0.025, 0.025, 0.035, 1)
+        metalView.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(metalView)
+
+        let title = UILabel()
+        title.text = "GTA V Port"
+        title.font = .systemFont(ofSize: 34, weight: .bold)
+        title.textColor = .white
+        let subtitle = UILabel()
+        subtitle.text = "Fan project · runs your own game files from your own server"
+        subtitle.font = .preferredFont(forTextStyle: .subheadline)
+        subtitle.textColor = .lightGray
+        controllerLabel.text = "Controller: none connected"
+        controllerLabel.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+        controllerLabel.textColor = .lightGray
+        var play = UIButton.Configuration.filled()
+        play.title = "Play"
+        play.cornerStyle = .large
+        play.buttonSize = .large
+        launchButton.configuration = play
+        launchButton.configurationUpdateHandler = { button in
+            // Progress text (preparing assets, loading) shows on the disabled button.
+            button.configuration?.title = button.isEnabled ? "Play" : button.title(for: .disabled) ?? "Loading…"
+        }
+        launchButton.addTarget(self, action: #selector(startEngine), for: .touchUpInside)
+        output.isEditable = false
+        output.isHidden = !ProcessInfo.processInfo.arguments.contains("--show-log")
+        output.backgroundColor = UIColor.black.withAlphaComponent(0.65)
+        output.textColor = .white
+        output.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        settingsButton.setTitle("Settings", for: .normal)
+        settingsButton.setImage(UIImage(systemName: "gearshape"), for: .normal)
+        settingsButton.addAction(UIAction { [weak self] _ in self?.showSettings() }, for: .touchUpInside)
+        serverButton.contentHorizontalAlignment = .leading
+        serverButton.titleLabel?.numberOfLines = 0
+        serverButton.addAction(UIAction { [weak self] _ in self?.askForAssetServer() }, for: .touchUpInside)
+        updateServerStatus()
+        if !GameSettings.shared.assetServer.isEmpty { testAssetServer() }
+        // The log (when shown) takes the spare height; everything else hugs its content.
+        for item in [title, subtitle, serverButton, launchButton, settingsButton, controllerLabel] as [UIView] {
+            item.setContentHuggingPriority(.required, for: .vertical)
+            item.setContentCompressionResistancePriority(.required, for: .vertical)
+        }
+        let spacer = UIView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .vertical)
+        let stack = UIStackView(arrangedSubviews: [title, subtitle, serverButton, launchButton, settingsButton, controllerLabel, output, spacer])
+        stack.setCustomSpacing(20, after: subtitle)
+        stack.setCustomSpacing(16, after: serverButton)
+        diagnosticsOverlay = stack
+        stack.axis = .vertical
+        stack.spacing = 8
+        stack.alignment = .leading
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(stack)
+        fpsLabel.text = "— FPS"
+        fpsLabel.isHidden = true
+        fpsLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .semibold)
+        fpsLabel.textColor = .white
+        fpsLabel.textAlignment = .center
+        fpsLabel.backgroundColor = UIColor.black.withAlphaComponent(0.5)
+        fpsLabel.layer.cornerRadius = 6
+        fpsLabel.clipsToBounds = true
+        fpsLabel.isUserInteractionEnabled = false
+        fpsLabel.accessibilityLabel = "Game frame rate"
+        fpsLabel.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(fpsLabel)
+        touchControls.translatesAutoresizingMaskIntoConstraints = false
+        touchControls.isHidden = true
+        touchControls.inputChanged = { [weak self] in self?.pollController() }
+        touchControls.openSettings = { [weak self] in self?.showSettings() }
+        view.addSubview(touchControls)
+        NSLayoutConstraint.activate([
+            touchControls.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            touchControls.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            touchControls.topAnchor.constraint(equalTo: view.topAnchor),
+            touchControls.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+        ])
+        NSLayoutConstraint.activate([
+            fpsLabel.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 12),
+            fpsLabel.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
+            fpsLabel.widthAnchor.constraint(equalToConstant: 68),
+            fpsLabel.heightAnchor.constraint(equalToConstant: 24)
+        ])
+        NSLayoutConstraint.activate([
+            metalView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            metalView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            metalView.topAnchor.constraint(equalTo: view.topAnchor),
+            metalView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            stack.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 16),
+            stack.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -16),
+            stack.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
+            stack.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -12)
+        ])
+        let directory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        logFile = directory.appendingPathComponent("native-port.log")
+        try? Data().write(to: logFile!)
+        appendLog("Native UIKit + Metal host. Engine compiled into the app; no WebView or JIT.")
+        appendLog("Metal device: \(device?.name ?? "unavailable")")
+        displayLink = CADisplayLink(target: self, selector: #selector(pollController))
+        displayLink?.add(to: .main, forMode: .common)
+        NotificationCenter.default.addObserver(self, selector: #selector(controllerChanged), name: .GCControllerDidDisconnect, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(controllerChanged), name: .GCControllerDidConnect, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(releaseTouchControls), name: UIApplication.willResignActiveNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(leftApp), name: UIApplication.didEnterBackgroundNotification, object: nil)
+        if let message = GameSettings.shared.recoverFromFailedBoot() { appendLog(message); controllerLabel.text = message; controllerLabel.numberOfLines = 0 }
+        if ProcessInfo.processInfo.arguments.contains("--touch-controls-preview") {
+            diagnosticsOverlay?.isHidden = true
+            touchControlsAvailable = true
+            fpsLabel.isHidden = false
+            touchControls.isHidden = false
+        }
+        if ProcessInfo.processInfo.arguments.contains("--open-settings") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.showSettings() }
+        }
+        if ProcessInfo.processInfo.arguments.contains("--boot-engine") {
+            DispatchQueue.main.async { self.startEngine() }
+        }
+    }
+
+    func appendLog(_ line: String) {
+        NSLog("[native-port] %@", line)
+        if line.hasPrefix("ASSET_WARM_PROGRESS ") {
+            let parts = line.split(separator: " ")
+            if parts.count >= 3 {
+                let size = Double(parts[2]).map { String(format: "%.1f GB", $0 * 1048576 / 1_000_000_000) } ?? ""
+                launchButton.setTitle("Preparing assets… \(parts[1])% · \(size)", for: .disabled); launchButton.setNeedsUpdateConfiguration()
+            }
+        }
+        if line == "ASSET_WARM_COMPLETE" { launchButton.setTitle("Loading…", for: .disabled); launchButton.setNeedsUpdateConfiguration() }
+        if line == "WORLD_READY", ProcessInfo.processInfo.arguments.contains("--capture-world") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 35) { PGCaptureNativeFrame("optimized-world") }
+        }
+        if line == "WORLD_READY", ProcessInfo.processInfo.arguments.contains("--verify-pad"), !movementProofStarted {
+            movementProofStarted = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 30) { self.verifyVirtualPad() }
+        }
+        if line == "WORLD_READY", ProcessInfo.processInfo.arguments.contains("--verify-movement"), !movementProofStarted {
+            movementProofStarted = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 30) { self.verifyMovement() }
+        }
+        if line == "WORLD_READY" { PGSetTargetingMode(Int32(GameSettings.shared.targetingMode)) }
+        if line == "WORLD_READY", stableTimer == nil {
+            // Three minutes in the world counts as a launch that fits in memory.
+            stableTimer = Timer.scheduledTimer(withTimeInterval: 180, repeats: false) { _ in GameSettings.shared.markBootStable() }
+        }
+        if line == "WORLD_READY" || line.contains("\"label\":\"First frame\"") {
+            diagnosticsOverlay?.isHidden = true
+            touchControlsAvailable = true
+            fpsLabel.isHidden = false
+        }
+        if line.hasPrefix("Native boot stopped:") || line == "iOS could not reserve the engine memory." {
+            audioEngine.stop()
+            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            metalView.isPaused = true
+        }
+        if let logFile, let data = (line + "\n").data(using: .utf8),
+           let handle = try? FileHandle(forWritingTo: logFile) {
+            defer { try? handle.close() }
+            do { try handle.seekToEnd(); try handle.write(contentsOf: data) } catch {}
+        }
+        for key in ["[wgpu] fps:", "[wgpu] draw costs", "Native frame costs:", "Phone memory:", "WORLD_READY"] where line.hasPrefix(key) {
+            metrics[key] = line
+            if let data = try? JSONSerialization.data(withJSONObject: metrics, options: [.prettyPrinted, .sortedKeys]), let logFile {
+                try? data.write(to: logFile.deletingLastPathComponent().appendingPathComponent("native-metrics.json"), options: .atomic)
+            }
+        }
+        lines.append(line)
+        if lines.count > 500 { lines.removeFirst(lines.count - 500) }
+        guard diagnosticsOverlay?.isHidden != true else { return }
+        output.text = lines.joined(separator: "\n")
+        if !output.text.isEmpty { output.scrollRangeToVisible(NSRange(location: output.text.utf16.count - 1, length: 1)) }
+    }
+
+    @objc private func startEngine() {
+        guard let path = Bundle.main.path(forResource: "manifest", ofType: "json") else {
+            appendLog("Asset manifest is missing from the app bundle.")
+            return
+        }
+        metalView.isPaused = true
+        metalView.delegate = nil
+        // Dawn owns the drawable size from here; MTKView must not reset it on layout.
+        metalView.autoResizeDrawable = false
+        PGAttachMetalLayer(Unmanaged.passUnretained(metalView.layer).toOpaque())
+        launchButton.isEnabled = false
+        settingsButton.isHidden = true
+        engineStarted = true
+        bootedPreset = GameSettings.shared.graphicsPreset
+        appendLog("Graphics: " + GraphicsConfiguration.apply(GameSettings.shared, screen: view.bounds.size))
+        appendLog("Device: " + GameSettings.shared.tier.summary)
+        GameSettings.shared.markBootStarted()
+        launchButton.setTitle("Loading…", for: .disabled); launchButton.setNeedsUpdateConfiguration()
+        appendLog("Native touch controls support held buttons, sprint and weapon selection.")
+        startAudio()
+        let root = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("EngineFiles").path
+        PGSetAssetServer(GameSettings.shared.assetServer)
+        path.withCString { manifest in
+            root.withCString { PGStartEngine(manifest, $0, engineLog, Unmanaged.passUnretained(self).toOpaque()) }
+        }
+    }
+
+    private func verifyMovement() {
+        let testController = GCController.withExtendedGamepad()
+        guard let pad = testController.extendedGamepad else {
+            appendLog("Movement proof needs the native touch controller.")
+            return
+        }
+        appendLog("Movement proof: capturing the world before native controller input.")
+        PGCaptureNativeFrame("movement-before")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+            self.proofController = testController
+            self.proofInputActive = true
+            self.proofInputSamples = 0
+            pad.leftThumbstick.setValueForXAxis(0, yAxis: 0.8)
+            pad.rightThumbstick.setValueForXAxis(0.25, yAxis: 0)
+            self.appendLog("Movement proof: native controller sticks active.")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 6) {
+                self.proofInputActive = false
+                self.appendLog("Movement proof: \(self.proofInputSamples) controller samples delivered to the engine.")
+                pad.leftThumbstick.setValueForXAxis(0, yAxis: 0)
+                pad.rightThumbstick.setValueForXAxis(0, yAxis: 0)
+                self.proofController = nil
+                PGCaptureNativeFrame("movement-after")
+                self.appendLog("Movement proof: native controller sticks released.")
+            }
+        }
+    }
+
+    /// Simulator proof that the engine accepts the virtual controller and
+    /// that controller aiming locks on: walk, pick a gun from the wheel, aim.
+    private func verifyVirtualPad() {
+        func log(_ step: String) { appendLog("Pad proof: \(step); input device \(PGLastInputDevice()), targeting mode \(PGTargetingMode())") }
+        func pad(_ build: (inout PGPadState) -> Void) -> PGPadState { var s = PGPadState(); build(&s); return s }
+        let steps: [(Double, PGPadState?, String?, String?)] = [
+            (0, PGPadState(), "before input", "pad-before"),
+            (0.5, pad { $0.leftY = 0.8 }, nil, nil),
+            (3.5, PGPadState(), "walked forward", "pad-moved"),
+            // Weapon wheel: hold L1 and point the right stick at a slot.
+            (4.5, pad { $0.padButtons = .l1 }, nil, nil),
+            (5.3, pad { $0.padButtons = .l1; $0.rightX = 1 }, "wheel open, pointing right", "pad-wheel"),
+            (6.3, PGPadState(), "wheel released", nil),
+            (8.0, pad { $0.leftTrigger = 1 }, nil, nil),
+            (9.2, pad { $0.leftTrigger = 1 }, "aim held", "pad-aim"),
+            (9.4, pad { $0.leftTrigger = 1; $0.rightX = 0.35 }, nil, nil),
+            (10.0, pad { $0.leftTrigger = 1; $0.rightTrigger = 1 }, nil, nil),
+            (10.6, pad { $0.leftTrigger = 1; $0.rightTrigger = 1 }, "aim and fire", "pad-fire"),
+            (11.5, PGPadState(), "released", nil)]
+        for (time, state, message, frame) in steps {
+            DispatchQueue.main.asyncAfter(deadline: .now() + time) {
+                if let state { self.padProof = state }
+                if let message { log(message) }
+                if let frame { PGCaptureNativeFrame(frame) }
+            }
+        }
+    }
+
+    private func startAudio() {
+        do {
+            let session = AVAudioSession.sharedInstance()
+            try session.setCategory(.playback, mode: .default)
+            try session.setPreferredSampleRate(48000)
+            try session.setActive(true)
+            let format = AVAudioFormat(standardFormatWithSampleRate: 48000, channels: 2)!
+            let source = AVAudioSourceNode(format: format) { _, _, count, audioBufferList in
+                let buffers = UnsafeMutableAudioBufferListPointer(audioBufferList)
+                guard buffers.count >= 2, let left = buffers[0].mData, let right = buffers[1].mData else { return noErr }
+                PGFillAudio(left.assumingMemoryBound(to: Float.self), right.assumingMemoryBound(to: Float.self), count)
+                return noErr
+            }
+            audioSource = source
+            audioEngine.attach(source)
+            audioEngine.connect(source, to: audioEngine.mainMixerNode, format: format)
+            try audioEngine.start()
+        } catch { appendLog("Native audio setup failed: \(error.localizedDescription)") }
+    }
+
+    @objc private func controllerChanged() { pollController() }
+
+    // MARK: Game file server
+
+    /// Shows the server and whether it answers; Play needs a working server.
+    private func updateServerStatus(_ status: String? = nil) {
+        let server = GameSettings.shared.assetServer
+        let text = server.isEmpty ? "Game file server: not set. Tap to enter it." : "Game file server: \(server)\(status.map { " · " + $0 } ?? "")"
+        serverButton.setTitle(text, for: .normal)
+        launchButton.isEnabled = !server.isEmpty && !engineStarted
+    }
+    private func askForAssetServer() {
+        let alert = UIAlertController(title: "Game file server", message: "The address of the computer that serves your own copy of the game files, for example https://my-pc.tailnet-name.ts.net", preferredStyle: .alert)
+        alert.addTextField { field in
+            field.text = GameSettings.shared.assetServer
+            field.placeholder = "https://my-pc.tailnet-name.ts.net"
+            field.keyboardType = .URL
+            field.autocapitalizationType = .none
+            field.autocorrectionType = .no
+        }
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        alert.addAction(UIAlertAction(title: "Save and test", style: .default) { [weak self, weak alert] _ in
+            GameSettings.shared.assetServer = alert?.textFields?.first?.text ?? ""
+            self?.testAssetServer()
+        })
+        present(alert, animated: true)
+    }
+    /// Checks that the server answers with the game's file list.
+    private func testAssetServer() {
+        var server = GameSettings.shared.assetServer
+        while server.hasSuffix("/") { server.removeLast() }
+        guard let url = URL(string: server + "/data/manifest.json"), url.scheme?.hasPrefix("http") == true else {
+            updateServerStatus("not a valid address"); return
+        }
+        updateServerStatus("checking…")
+        var request = URLRequest(url: url, timeoutInterval: 10)
+        request.httpMethod = "HEAD"
+        URLSession.shared.dataTask(with: request) { [weak self] _, response, error in
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            DispatchQueue.main.async {
+                if code == 200 { self?.updateServerStatus("connected ✓") }
+                else if let error { self?.updateServerStatus("can't connect (\(error.localizedDescription))") }
+                else { self?.updateServerStatus("answered \(code); is the address the folder with data/ and b/?") }
+            }
+        }.resume()
+    }
+    @objc private func leftApp() { if stableTimer?.isValid != false { GameSettings.shared.markBootInterrupted() } }
+
+    private func showSettings() {
+        guard presentedViewController == nil else { return }
+        touchControls.reset()
+        let controller = SettingsViewController(engineRunning: engineStarted)
+        controller.resolutionChanged = { [weak self] in self?.applyLiveResolution() }
+        controller.controlsChanged = { [weak self] in self?.touchControls.updateVisibility() }
+        controller.targetingChanged = { PGSetTargetingMode(Int32(GameSettings.shared.targetingMode)) }
+        present(UINavigationController(rootViewController: controller), animated: true)
+    }
+    /// The engine follows back-buffer size changes while running.
+    private func applyLiveResolution() {
+        guard engineStarted else { return }
+        let settings = GameSettings.shared
+        let (width, height) = GraphicsConfiguration.size(for: bootedPreset, scale: settings.resolutionScale, screen: view.bounds.size, matchScreenShape: settings.matchScreenShape)
+        PGSetBackBufferSize(Int32(width), Int32(height))
+        appendLog("Graphics: live resize to \(width)×\(height)")
+    }
+    @objc private func releaseTouchControls() {
+        touchControls.reset(publish: false)
+        gyro.setRunning(false, orientation: .landscapeRight)
+        lastControllerPoll = nil
+        #if targetEnvironment(simulator)
+        simulatorKeys.removeAll()
+        #endif
+        PGUpdateVirtualPad(PGPadState())
+    }
+    @objc private func pollController() {
+        guard UIApplication.shared.applicationState == .active else {
+            touchControls.reset(publish: false)
+            lastControllerPoll = nil
+            PGUpdateVirtualPad(PGPadState())
+            return
+        }
+        let now = CACurrentMediaTime()
+        if now - lastFPSLabelUpdate >= 0.25 {
+            let fps = PGRenderedFramesPerSecond()
+            fpsLabel.text = fps > 0 ? String(format: "%.0f FPS", fps) : "— FPS"
+            lastFPSLabelUpdate = now
+        }
+        let elapsed = lastControllerPoll.map { now - $0 } ?? (1.0 / 60.0)
+        lastControllerPoll = now
+        if let padProof { PGUpdateVirtualPad(padProof); return }
+        // Everything reaches the engine as its own controller, so controller
+        // features (assisted aim, analog steering and throttle) apply.
+        var state = PGPadState()
+        if let controller = GCController.controllers().first(where: { $0.extendedGamepad != nil }), let pad = controller.extendedGamepad {
+            state = PGPadState(gamepad: pad)
+            if diagnosticsOverlay?.isHidden != true { controllerLabel.text = "Controller: \(controller.vendorName ?? "Gamepad")" }
+        } else if diagnosticsOverlay?.isHidden != true {
+            controllerLabel.text = "Touch controls ready"
+        }
+        touchControls.isHidden = !touchControlsAvailable
+        var vehicle = touchControlsAvailable ? PGCurrentTouchContext() : 0
+        var pauseMenu = PGPauseMenuActive()
+        // Debug: --preview-context <vehicle type + 1 | menu> to review a layout.
+        let arguments = ProcessInfo.processInfo.arguments
+        if let i = arguments.firstIndex(of: "--preview-context"), i + 1 < arguments.count {
+            if arguments[i + 1] == "menu" { pauseMenu = true } else { vehicle = UInt32(arguments[i + 1]) ?? 0 }
+        }
+        if touchControlsAvailable {
+            touchControls.updateContext(vehicle: vehicle, pauseMenu: pauseMenu)
+            let touch = touchControls.padState(elapsed: elapsed)
+            if ProcessInfo.processInfo.arguments.contains("--trace-touch-controls") {
+                let sample = String(format: "Touch pad: buttons=%u move=%.2f,%.2f look=%.2f,%.2f triggers=%.2f,%.2f device=%d", touch.buttons, touch.leftX, touch.leftY, touch.rightX, touch.rightY, touch.leftTrigger, touch.rightTrigger, PGLastInputDevice())
+                if sample != lastTouchInputTrace { lastTouchInputTrace = sample; appendLog(sample) }
+            }
+            state.merge(touch)
+        }
+        #if targetEnvironment(simulator)
+        var keys = PGPadState()
+        func held(_ key: UIKeyboardHIDUsage) -> Float { simulatorKeys.contains(key) ? 1 : 0 }
+        keys.leftX = held(.keyboardD) - held(.keyboardA)
+        keys.leftY = held(.keyboardW) - held(.keyboardS)
+        keys.rightX = held(.keyboardRightArrow) - held(.keyboardLeftArrow)
+        keys.rightY = held(.keyboardUpArrow) - held(.keyboardDownArrow)
+        keys.leftTrigger = held(.keyboardZ); keys.rightTrigger = held(.keyboardX)
+        let map: [(UIKeyboardHIDUsage, PadButtons)] = [(.keyboardSpacebar, .x), (.keyboardLeftShift, .a), (.keyboardF, .y), (.keyboardR, .b),
+            (.keyboardQ, .r1), (.keyboardTab, .l1), (.keyboardV, .select), (.keyboardEscape, .start), (.keyboardE, .l3),
+            (.keyboardReturnOrEnter, .a), (.keyboardDeleteOrBackspace, .b), (.keyboardI, .up), (.keyboardK, .down), (.keyboardJ, .left), (.keyboardL, .right)]
+        var keyButtons = PadButtons()
+        for (key, bit) in map where simulatorKeys.contains(key) { keyButtons.insert(bit) }
+        keys.padButtons = keyButtons
+        state.merge(keys)
+        #endif
+        // Optional gyro: phone rotation adds to the right stick.
+        let settings = GameSettings.shared
+        let onFoot = vehicle == 0
+        let driving = touchControls.context.driving
+        let tiltWanted = touchControlsAvailable && driving && settings.tiltSteer != .off
+        let gyroWanted = touchControlsAvailable && ((settings.gyroAim != .off && !touchControls.flyingWithRightStick && touchControls.context != .menu) || tiltWanted)
+        let orientation = view.window?.windowScene?.interfaceOrientation ?? .landscapeRight
+        gyro.setRunning(gyroWanted, orientation: orientation)
+        if tiltWanted, let angle = gyro.steeringAngle() {
+            // The neutral angle is however the phone is held on entering.
+            if tiltSince == nil { tiltSince = now }
+            if tiltNeutral == nil, now - (tiltSince ?? now) > 0.15 { tiltNeutral = angle }
+            if let neutral = tiltNeutral {
+                var degrees = (angle - neutral) * 180 / .pi
+                degrees = abs(degrees) < 1.5 ? 0 : degrees - copysign(1.5, degrees)
+                let raw = max(-1, min(1, degrees / settings.tiltFullLock))
+                let curved = copysign(pow(abs(raw), 1.4), raw)
+                tiltSmoothed += (curved - tiltSmoothed) * min(1, elapsed / 0.06)
+                let fadeIn = min(1, (now - (tiltSince ?? now) - 0.15) / 0.3)
+                let tilt = Float(tiltSmoothed * max(0, fadeIn))
+                if settings.tiltSteer == .full && abs(state.leftX) < 0.05 { state.leftX = tilt }
+                else if settings.tiltSteer == .assist { state.leftX = max(-1, min(1, state.leftX + tilt * 0.6)) }
+            }
+        } else if !driving {
+            tiltNeutral = nil; tiltSince = nil; tiltSmoothed = 0
+        }
+        if gyroWanted && settings.gyroAim != .off {
+            let aiming = touchControls.aiming || state.leftTrigger > 0.1
+            let active = aiming || (settings.gyroAim == .always && onFoot)
+            let rate = gyro.rate(active: active, elapsed: elapsed)
+            // About 2 rad/s of phone rotation is a full stick at sensitivity 1.
+            let gain = 350 * settings.gyroSensitivity
+            let invert: CGFloat = settings.gyroInvertY ? -1 : 1
+            state.rightX = max(-1, min(1, state.rightX + TouchControlsView.lookAxis(rate.dx * gain)))
+            state.rightY = max(-1, min(1, state.rightY - TouchControlsView.lookAxis(rate.dy * gain * invert)))
+        }
+        PGUpdateVirtualPad(state)
+    }
+
+    func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
+    func draw(in view: MTKView) {
+        guard let descriptor = view.currentRenderPassDescriptor, let drawable = view.currentDrawable,
+              let command = queue?.makeCommandBuffer(), let encoder = command.makeRenderCommandEncoder(descriptor: descriptor) else { return }
+        encoder.endEncoding()
+        command.present(drawable)
+        command.commit()
+    }
+}

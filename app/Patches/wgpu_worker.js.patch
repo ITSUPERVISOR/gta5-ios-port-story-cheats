@@ -1,0 +1,981 @@
+--- orig_worker.js	2026-10-10 20:04:07
++++ new_worker.js	2026-10-10 20:04:07
+@@ -66,7 +66,7 @@
+ };
+ const BIND_SRV = 0x8, BIND_RT = 0x20, BIND_DS = 0x40, BIND_UAV = 0x80;
+ 
+-function mapFormat(f, bind) {
++function mapOriginalFormat(f, bind) {
+ 	const ds = (bind & BIND_DS) !== 0;
+ 	switch (f) {
+ 	case DXGI.R32G32B32A32_FLOAT: return { format: 'rgba32float' };
+@@ -112,6 +112,12 @@
+ 	}
+ }
+ 
++function mapFormat(f,bind){
++ const m=mapOriginalFormat(f,bind);
++ if(m.format.startsWith('bc')&&device&&!device.features.has('texture-compression-bc')){m.format=nativeBCFormat(m.format);if(m.views)m.views=m.views.map(nativeBCFormat);}
++ return m;
++}
++
+ const hasStencil = (format) => format === 'depth24plus-stencil8' || format === 'depth32float-stencil8' || format === 'stencil8';
+ const isDepth = (format) => format.startsWith('depth') || format === 'stencil8';
+ 
+@@ -161,12 +167,13 @@
+ // Buffer/texture objects referenced by commands recorded since the last submit carry `enc === encEpoch`; flush() starts a new epoch. (A Set cost a hash insert for every bound
+ // buffer of every draw; nothing iterates it.)
+ let encEpoch = 1, submits = 0, submits0 = 0;
+-const usedInEncoder = { add(o) { if (o) o.enc = encEpoch; }, has(o) { return !!o && o.enc === encEpoch; }, clear() { encEpoch++; } };
++const usedInEncoder = { add(o) { if (o) o.enc = encEpoch; }, has(o) { return !!o && (o.enc === encEpoch || (nativeCompiledUniforms&&nativePreparedDraws&&nativeResourceMarkers&&o.nativeResourceId&&nativeResourceUsed(o.nativeResourceId,encEpoch))); }, clear() { encEpoch++; } };
+ const flushReasons = new Map();		// submits per reason since the last fps line
+ function flush(reason) {
+ 	const tf0 = performance.now();
+ 	if (encoder || pass) { const r = reason || 'other'; flushReasons.set(r, (flushReasons.get(r) || 0) + 1); }
+ 	endPass();
++	flushDrawBatch();nativeFlushUniformRing();
+ 	if (dirtyChunks.size) flushUniforms();
+ 	const resolves = pendingResolve.length ? recordResolves() : null;		// into this encoder: no command buffer of its own
+ 	if (encoder) { device.queue.submit([encoder.finish()]); encoder = null; onSubmitted(); submits++; counterSlot = 0; }
+@@ -244,6 +251,7 @@
+ 			if (b.dim === 'depth_2d') b.dim = '2d';
+ 			b.dim = ({ '2d': '2d', '2d_array': '2d-array', '3d': '3d', 'cube': 'cube', 'cube_array': 'cube-array', '1d': '1d' })[b.dim] || b.dim;
+ 		}
++		if (b.kind==='texture' && b.sample==='float' && !new RegExp('texture(?:Sample|Gather)\\w*\\s*\\(\\s*(?:[^,()]+,\\s*)?'+b.name+'\\b').test(text)) b.sample='unfilterable-float';
+ 		bindings.push(b);
+ 	}
+ 	// fragment outputs: locations of the return value of `fn main`
+@@ -542,12 +550,15 @@
+ // Stutter diagnostics: what this worker spent time on since the last present; frames over SPIKE_MS are listed in the 10 s log line with the breakdown
+ const fr = { idle: 0, pipe: 0, mod: 0, up: 0, upBytes: 0, wait: 0, flush: 0 };
+ const SPIKE_MS = 40;
+-let lastPresentT = 0, spikes = [], spikeCount = 0, frameMax = 0, over25 = 0;
++let lastPresentT = 0, nativeFrameDraw0=0, spikes = [], spikeCount = 0, frameMax = 0, over25 = 0;
+ let pipeMs = 0, pipeCreates = 0, pipeCreates0 = 0, busyMs = 0, idleMs = 0, shaderModuleCount = 0, fpsT0 = 0, fpsCount0 = 0, fpsDraw0 = 0;
++let nativeDrawCounter0=nativeDrawCounters.slice();
+ let texBytesAlive = 0, texBytesPeak = 0, texCount = 0, bufBytesAlive = 0, bufBytesPeak = 0;
+ 
+ function createTexture(id, dim, w, h, d, mips, arraySize, dxgi, bind, samples) {
+-	const m = mapFormat(dxgi, bind);
++	const original = mapOriginalFormat(dxgi,bind);
++	const nativeBC = original.format.startsWith('bc') && !device.features.has('texture-compression-bc') ? original.format : null;
++	const m = mapFormat(dxgi,bind);
+ 	let usage = GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST;
+ 	if (bind & BIND_SRV) usage |= GPUTextureUsage.TEXTURE_BINDING;
+ 	if (bind & (BIND_RT | BIND_DS)) usage |= GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING;
+@@ -564,7 +575,8 @@
+ 	const bytes = textureBytes(desc);
+ 	texBytesAlive += bytes; texCount++;
+ 	if (texBytesAlive > texBytesPeak) texBytesPeak = texBytesAlive;
+-	objs.set(id, { kind: 'texture', tex, desc, format: m.format, views: new Map(), a8: !!m.a8, bytes });
++	nativeRegisterTextureFlags(id,1|(isDepth(m.format)?2:0)|(!device.features.has('float32-filterable')&&(m.format==='r32float'||m.format==='rg32float'||m.format==='rgba32float')?4:0));
++	objs.set(id, { kind: 'texture', nativeResourceId:id, tex, desc, format: m.format, nativeFloatProxy: !device.features.has('float32-filterable') && (m.format==='r32float'||m.format==='rg32float'||m.format==='rgba32float'), nativeBC, views: new Map(), a8: !!m.a8, bytes });
+ }
+ 
+ // Exit report: where the GPU-side memory of the mirror goes (diagnostics for the 4 GB target).
+@@ -582,8 +594,8 @@
+ }
+ 
+ function createBuffer(id, size, bind, misc, stride) {
+-	const o = { kind: 'buffer', uid: id, size, bind, misc, stride, gpu: null, shadow: null, version: 0 };
+-	if (bind & 4) { o.shadow = new Uint8Array(size); }		// constant buffers live in this shadow and are copied to the uniform ring per draw
++	const o = { kind: 'buffer', uid: id, nativeResourceId:id, size, bind, misc, stride, gpu: null, shadow: null, version: 0 };
++	if (bind & 4) { o.shadow = new Uint8Array(nativeMakeUniformBuffer(id,size)); }		// constant buffers live in this shadow and are copied to the uniform ring per draw
+ 	let usage = GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
+ 	if (bind & 1) usage |= GPUBufferUsage.VERTEX;
+ 	if (bind & 2) usage |= GPUBufferUsage.INDEX;
+@@ -592,6 +604,7 @@
+ 	if ((bind & (1 | 2 | 8 | 0x80)) || (misc & 0x10)) {
+ 		o.bytes = Math.max(4, (size + 3) & ~3);		// the GPU buffer's size (per-draw code reads this: GPUBuffer.size is a native getter, ~5 % of the worker read per draw)
+ 		o.gpu = device.createBuffer({ size: o.bytes, usage });
++        nativeRegisterDrawBuffer(id,o.gpu,o.bytes);
+ 		bufBytesAlive += o.bytes;
+ 		if (bufBytesAlive > bufBytesPeak) bufBytesPeak = bufBytesAlive;
+ 	}
+@@ -601,10 +614,10 @@
+ function uploadBuffer(id, offset, size, dataOff, noOverwrite) {
+ 	const o = objs.get(id);
+ 	if (!o) return;
+-	if (o.shadow) { o.shadow.set(u8.subarray(dataOff, dataOff + size), offset); o.version++; }
++	if (o.shadow) { nativeUploadUniform(id,offset,dataOff,size); o.version++; }
+ 	if (debugDraw && o.gpu && !o.shadow) { if (!o.dbg) o.dbg = new Uint8Array(o.size); o.dbg.set(u8.subarray(dataOff, dataOff + size), offset); }
+ 	if (o.gpu) {
+-		if (!noOverwrite && usedInEncoder.has(o)) flush('buffer upload');		// a recorded draw still reads the old contents: D3D semantics need them (not after a no-overwrite map: the app promises those bytes are unused)
++		if (!noOverwrite && (usedInEncoder.has(o)||nativeDrawBufferPending(id))) flush('buffer upload');		// a recorded draw still reads the old contents: D3D semantics need them (not after a no-overwrite map: the app promises those bytes are unused)
+ 		const n = size & ~3;
+ 		if (n) device.queue.writeBuffer(o.gpu, offset, u8, dataOff, n);
+ 		if (size & 3) {		// tail bytes: merge into a padded 4-byte write
+@@ -613,6 +626,7 @@
+ 		}
+ 	}
+ }
++function nativeDrawBufferPending(id){flushDrawBatch();return nativeDrawBufferUsed(id,encEpoch);}
+ 
+ function uploadTexture(id, mip, slice, x, y, z, w, h, d, bytesPerRow, rowsPerImage, size, dataOff) {
+ 	const o = objs.get(id);
+@@ -623,6 +637,18 @@
+ 	const three = o.desc.dimension === '3d';
+ 	const origin = { x, y, z: three ? z : slice };
+ 	let data = u8.subarray(dataOff, dataOff + size), bpr = bytesPerRow;
++	if (o.nativeBC) {
++		w = Math.min(w, Math.max(1, o.desc.size.width >> mip) - x);
++		h = Math.min(h, Math.max(1, o.desc.size.height >> mip) - y);
++		storeCompressedUpload(o,mip,slice,x,y,z,w,h,d,bytesPerRow,rowsPerImage,data);
++		if(typeof nativeUploadBC==='function'&&nativeFusedBCUploads){
++			nativeUploadBC({texture:o.tex,mipLevel:mip,origin},o.nativeBC,w,h,d,bytesPerRow,rowsPerImage,data);
++			return;
++		}
++		data = new Uint8Array(nativeDecodeBC(o.nativeBC, w, h, d, bytesPerRow, rowsPerImage, data));
++		bpr = w * (o.nativeBC.startsWith('bc4') ? 1 : o.nativeBC.startsWith('bc5') ? 2 : o.nativeBC.startsWith('bc6') ? 8 : 4);
++		rowsPerImage = h;
++	}
+ 	if (o.a8) {		// expand one byte per texel to (0,0,0,a)
+ 		const out = new Uint8Array(w * h * 4);
+ 		for (let r = 0; r < h; r++) for (let c = 0; c < w; c++) out[(r * w + c) * 4 + 3] = data[r * bytesPerRow + c];
+@@ -632,6 +658,23 @@
+ 		{ bytesPerRow: bpr, rowsPerImage }, { width: w, height: h, depthOrArrayLayers: d });
+ }
+ 
++// The GPU's decoded texture and the engine's compressed staging layout differ.
++// Preserve the original blocks for CPU reads, including terrain colour samples.
++function storeCompressedUpload(o,mip,slice,x,y,z,w,h,d,bpr,rpi,data) {
++ const m=mipSize(o,mip),bi=blockInfo(o.nativeBC),pitch=Math.ceil(m.w/4)*bi.bytes,rows=Math.ceil(m.h/4),count=Math.ceil(w/4)*bi.bytes,uploadRows=Math.ceil(h/4);
++ const shadows=o.compressedShadow||(o.compressedShadow=new Map()),sourceSlice=bpr*(rpi||uploadRows),three=o.desc.dimension==='3d';
++ for(let layer=0;layer<d;layer++){
++  const key=mip+':'+(three?z+layer:slice+layer);let shadow=shadows.get(key);if(!shadow){shadow=new Uint8Array(pitch*rows);shadows.set(key,shadow);}
++  if(typeof nativeStoreTextureRows==='function'&&nativeTextureShadowRows&&data.buffer===memBuffer){
++   nativeStoreTextureRows(shadow,data.byteOffset,data.length,layer*sourceSlice,bpr,Math.floor(y/4)*pitch+Math.floor(x/4)*bi.bytes,pitch,count,uploadRows);
++  }else{
++   for(let row=0;row<uploadRows;row++){const from=layer*sourceSlice+row*bpr,to=(Math.floor(y/4)+row)*pitch+Math.floor(x/4)*bi.bytes;
++    if(from+count>data.length||to+count>shadow.length)throw new Error('Invalid compressed texture upload range');shadow.set(data.subarray(from,from+count),to);
++   }
++  }
++ }
++}
++
+ function createShader(p, n) {
+ 	const id = u32[p], stage = u32[p + 1], hash = u32[p + 3].toString(16).padStart(8, '0') + u32[p + 2].toString(16).padStart(8, '0');
+ 	const nin = u32[p + 4];
+@@ -674,19 +717,24 @@
+ }
+ 
+ function createSrv(p) {
++ nativeRegisterSrv(u32[p],u32[p+2],u32[p+1]===1);
+ 	// id, resKind(0 tex, 1 buf), resId, dxgi, viewDim, a, b, c, d
+ 	objs.set(u32[p], { kind: 'srv', res: u32[p + 2], isBuf: u32[p + 1] === 1, fmt: u32[p + 3], vdim: u32[p + 4], a: u32[p + 5], b: u32[p + 6], c: u32[p + 7], d: u32[p + 8], views: new Map() });
+ }
+ 
+ // ---- pipeline state -----------------------------------------------------------------------------------------------------------
++function plainConstantBindings(){return [0,1,2].map(()=>Array.from({length:16},()=>({buf:0,first:0,num:0})));}
++const sharedConstantBindings=[0,1,2].map(stage=>Array.from({length:16},(_,slot)=>{
++ const at=(stage*16+slot)*3,object={};for(const [name,index] of [['buf',0],['first',1],['num',2]])Object.defineProperty(object,name,{enumerable:true,get:()=>nativeCBState[at+index],set:value=>{nativeCBState[at+index]=value;}});return object;
++}));
+ const S = {
+ 	shader: [0, 0, 0], layout: 0, topo: 4,
+ 	vb: Array.from({ length: 16 }, () => ({ buf: 0, stride: 0, offset: 0 })),
+ 	ib: { buf: 0, fmt: 0, offset: 0 },
+-	cb: [0, 1, 2].map(() => Array.from({ length: 16 }, () => ({ buf: 0, first: 0, num: 0 }))),
+-	srv: [0, 1, 2].map(() => new Array(128).fill(0)),
+-	uav: [0, 1, 2].map(() => new Array(8).fill(0)),
+-	smp: [0, 1, 2].map(() => new Array(16).fill(0)),
++	cb: nativeCompiledUniforms?sharedConstantBindings:plainConstantBindings(),
++	srv: [0, 1, 2].map(s => nativeBindingState.subarray(s*152+16,s*152+144)),
++	uav: [0, 1, 2].map(s => nativeBindingState.subarray(s*152+144,s*152+152)),
++	smp: [0, 1, 2].map(s => nativeBindingState.subarray(s*152,s*152+16)),
+ 	rt: Array.from({ length: 8 }, () => ({ tex: 0, mip: 0, slice: 0, fmt: 0 })), ds: { tex: 0, mip: 0, slice: 0, fmt: 0, flags: 0 },
+ 	blend: { id: 0, factor: [1, 1, 1, 1], mask: 0xffffffff }, dss: { id: 0, ref: 0 }, rs: 0,
+ 	viewports: [], scissors: [],
+@@ -695,14 +743,17 @@
+ let pdirty = true, lastPl = null, lastPlPass = null;		// pipeline memo: any command that changes the pipeline key sets pdirty
+ 
+ function resetState() {
++ nativeDrawSynced=false;
++ nativeWarmState.fill(0);
++ nativePipelineState.fill(0);nativePipelineState[3]=4;
+ 	pdirty = true;
+ 	S.shader = [0, 0, 0]; S.layout = 0; S.topo = 4;
+ 	S.vb.forEach((v) => { v.buf = 0; v.stride = 0; v.offset = 0; });
+ 	S.ib = { buf: 0, fmt: 0, offset: 0 };
+-	for (let s = 0; s < 3; s++) { S.cb[s].forEach((c) => { c.buf = 0; c.first = 0; c.num = 0; }); S.srv[s].fill(0); S.smp[s].fill(0); }
++	for (let s = 0; s < 3; s++) { S.cb[s].forEach((c) => { c.buf = 0; c.first = 0; c.num = 0; });nativeCBState.fill(0,s*48,(s+1)*48); S.srv[s].fill(0); S.smp[s].fill(0); }
+ 	S.rt.forEach((r) => { r.tex = 0; r.mip = 0; r.slice = 0; r.fmt = 0; });
+ 	S.ds = { tex: 0, mip: 0, slice: 0, fmt: 0, flags: 0 };
+-	rtKey = null; bindEpoch[0]++; bindEpoch[1]++; bindEpoch[2]++; gEpoch++;
++	rtKey = null; bindEpoch[0]++; bindEpoch[1]++; bindEpoch[2]++;srvEpoch[0]++;srvEpoch[1]++;srvEpoch[2]++; gEpoch++;
+ 	S.blend = { id: 0, factor: [1, 1, 1, 1], mask: 0xffffffff }; S.dss = { id: 0, ref: 0 }; S.rs = 0;
+ 	S.viewports = []; S.scissors = [];
+ 	endPass();
+@@ -775,7 +826,23 @@
+ 	dirtyChunks.clear();
+ }
+ const curObjs = [], curVers = [], curFirsts = [];		// scratch: identity of the constant buffers a program's pack reads right now
++let nativePackMs=0,nativePackSamples=0;
++const compiledRingChunks=Array.from({length:FRAME_SLOTS},()=>[]);
+ function packCopy(prog, stage) {
++ const measure=nativeDetailedProfile&&(++nativePackSamples&15)===0; const begin=measure?performance.now():0;
++ const result=nativeCompiledUniforms?packCopyCompiled(prog,stage):packCopyInner(prog,stage);if(measure)nativePackMs+=performance.now()-begin;return result;
++}
++function packCopyCompiled(prog,stage) {
++ const pack=prog.pack;if(!pack)return null;
++ if(pack.size>UBO_WINDOW)return packCopyInner(prog,stage);
++ if(!pack.native){const layout=new Uint32Array(pack.members.length*3);for(let i=0;i<pack.members.length;i++){const m=pack.members[i];layout[i*3]=m.binding;layout[i*3+1]=m.size;layout[i*3+2]=m.offset;}pack.native=nativeMakeUniformPack(layout);pack.nativeAlloc=[[],[],[]];}
++ const result=nativeAllocateUniformPack(pack.native,stage,ubo.frame,ubo.slot,FRAME_SLOTS,pack.size);if(result<0)throw new Error('Compiled constant pack failed');
++ const index=result&255;
++ const chunkIndex=nativeUniformAllocation[0],off=nativeUniformAllocation[1],chunks=compiledRingChunks[ubo.slot];
++ const chunk=chunks[chunkIndex]||(chunks[chunkIndex]={buf:nativeUniformBuffers[chunkIndex],id:0x40000000+chunkIndex,base:ubo.slot*RING_CHUNK});
++ const allocation=pack.nativeAlloc[stage][index]||(pack.nativeAlloc[stage][index]={chunk,off,frame:ubo.frame});allocation.chunk=chunk;allocation.off=off;allocation.frame=ubo.frame;return allocation;
++}
++function packCopyInner(prog, stage) {
+ 	const pack = prog.pack;
+ 	if (!pack) return null;
+ 	if (pack.size > UBO_WINDOW) { logOnce('packbig' + prog.label, prog.label + ': constant buffers total ' + pack.size + ' bytes (> 64 KB uniform binding limit)'); return null; }
+@@ -852,18 +919,21 @@
+ 	return b;
+ }
+ 
+-function srvView(srv, b) {
++function srvView(srv, b, dependencies) {
+ 	// GPUTextureView of an SRV in the dimension the shader declares
+ 	let t = objs.get(srv.res);
+ 	if (!t || t.kind !== 'texture') return null;
+ 	let proxied = false;
+ 	if (isDepth(t.format) && b.sample !== 'depth') {
+ 		t = depthProxy(t, b.sample === 'uint' ? 'stencil' : 'depth');
++		if(dependencies)dependencies.push(t);
+ 		proxied = true; sawProxy = true;
+ 	} else if (!isDepth(t.format) && b.sample === 'depth') {
+ 		t = floatToDepthProxy(t);
++		if(dependencies)dependencies.push(t);
+ 		proxied = true; sawProxy = true;
+ 	}
++	if (needsFloatProxy(t, b)) { t = filterableFloatProxy(t); if(dependencies)dependencies.push(t); proxied = true; sawProxy = true; }
+ 	const key = b.dim + (proxied ? ':p' : '');
+ 	let v = srv.views.get(key);
+ 	if (v && !proxied) return v;
+@@ -947,7 +1017,7 @@
+ 	}
+ 	return px;
+ }
+-function markColorDirty(t) { if (t && t.proxy_fdepth) t.proxy_fdepth.dirty = true; }
++function markColorDirty(t) { if (!t) return; if (t.proxy_fdepth) t.proxy_fdepth.dirty = true; if (t.proxy_filter) t.proxy_filter.dirty = true; }
+ 
+ function depthProxy(t, kind) {
+ 	// returns the proxy texture object of depth texture `t`, refreshed if the depth texture changed since the last refresh
+@@ -957,7 +1027,7 @@
+ 		const d = t.desc;
+ 		const tex = device.createTexture({ size: d.size, mipLevelCount: d.mipLevelCount, sampleCount: 1, dimension: '2d',
+ 			format: kind === 'depth' ? 'r32float' : 'r8uint', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT });
+-		px = t[key] = { kind: 'texture', tex, desc: { size: d.size, mipLevelCount: d.mipLevelCount, dimension: '2d', sampleCount: 1 }, format: tex.format, views: new Map(), dirty: true };
++		px = t[key] = { kind: 'texture', tex, desc: { size: d.size, mipLevelCount: d.mipLevelCount, dimension: '2d', sampleCount: 1 }, format: tex.format, nativeFloatProxy: kind==='depth' && !device.features.has('float32-filterable'), views: new Map(), dirty: true };
+ 	}
+ 	if (px.dirty) {
+ 		endPass();
+@@ -980,6 +1050,7 @@
+ 		}
+ 		usedInEncoder.add(t);
+ 		px.dirty = false;
++		markColorDirty(px);
+ 		t['clean_' + kind] = true;
+ 	}
+ 	return px;
+@@ -987,6 +1058,50 @@
+ 
+ function markDepthDirty(t) { t.proxy_depth && (t.proxy_depth.dirty = true); t.proxy_stencil && (t.proxy_stencil.dirty = true); }
+ 
++// Keep authoritative 32-bit render/storage textures, but sample a Metal-filterable copy.
++// Load-only bindings retain the original precision. Conversion stays on the phone GPU.
++const floatProxyPipelines = new Map();
++function needsFloatProxy(t,b) { return b.sample === 'float' && t.nativeFloatProxy; }
++function filterableFloatProxy(t) {
++ let px=t.proxy_filter;
++ if (!px) {
++  const desc={...t.desc,format:'rgba16float',viewFormats:[],usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.STORAGE_BINDING};
++  const tex=device.createTexture(desc);
++  px=t.proxy_filter={kind:'texture',tex,desc,format:desc.format,dirty:true,views:new Map()};
++ }
++ if (!px.dirty) return px;
++ endPass();
++ const d=t.desc, dim=d.dimension==='3d'?'3d':d.dimension==='1d'?'1d':d.size.depthOrArrayLayers>1?'2d-array':'2d';
++ let pl=floatProxyPipelines.get(dim);
++ if (!pl) {
++  const wgdim=dim.replace('-','_'), coord=dim==='1d'?'i32(g.x)':dim==='3d'?'vec3i(g)':'vec2i(g.xy)';
++  const array=dim==='2d-array', args=array?coord+', i32(g.z)':coord;
++  const bounds=dim==='1d'?'g.x>=u32(n)':dim==='2d'?'any(g.xy>=n)':array?'any(g.xy>=n) || g.z>=textureNumLayers(dst)':'any(g>=n)';
++  const code=`@group(0) @binding(0) var src:texture_${wgdim}<f32>;
++   @group(0) @binding(1) var dst:texture_storage_${wgdim}<rgba16float,write>;
++   @compute @workgroup_size(8,8,1) fn main(@builtin(global_invocation_id) g:vec3u) {
++    let n=textureDimensions(dst); if (${bounds}) { return; }
++    textureStore(dst,${args},textureLoad(src,${args},0));
++   }`;
++  const bgl=device.createBindGroupLayout({entries:[{binding:0,visibility:4,texture:{sampleType:'unfilterable-float',viewDimension:dim}},{binding:1,visibility:4,storageTexture:{access:'write-only',format:'rgba16float',viewDimension:dim}}]});
++  const module=device.createShaderModule({code});
++  pl={bgl,pipeline:device.createComputePipeline({layout:device.createPipelineLayout({bindGroupLayouts:[bgl]}),compute:{module,entryPoint:'main'}})};
++  floatProxyPipelines.set(dim,pl);
++ }
++ if (!px.passes) {
++  px.passes=[];
++  for(let mip=0;mip<d.mipLevelCount;mip++) {
++   const view={dimension:dim,baseMipLevel:mip,mipLevelCount:1};
++   const bg=device.createBindGroup({layout:pl.bgl,entries:[{binding:0,resource:t.tex.createView(view)},{binding:1,resource:px.tex.createView(view)}]});
++   px.passes.push({bg,w:Math.max(1,d.size.width>>mip),h:Math.max(1,d.size.height>>mip),z:dim==='3d'?Math.max(1,d.size.depthOrArrayLayers>>mip):d.size.depthOrArrayLayers});
++  }
++ }
++ const pass=getEncoder().beginComputePass();pass.setPipeline(pl.pipeline);
++ for(const r of px.passes) {pass.setBindGroup(0,r.bg);pass.dispatchWorkgroups(Math.ceil(r.w/8),Math.ceil(r.h/8),r.z);}
++ pass.end();usedInEncoder.add(t);px.dirty=false;
++ return px;
++}
++
+ // ---- pipelines --------------------------------------------------------------------------------------------------------------------
+ const layoutCache = new Map();
+ // Pipelines are found by a tuple of small integers (shader hashes and pass formats interned) hashed to a number: building and hashing a string key took ~15 % of the worker,
+@@ -1141,8 +1256,19 @@
+ 	return m;
+ }
+ 
++function rememberNativePipeline(layout,tail,pipeline){if(nativeCompiledUniforms&&pipeline!==PIPELINE_PENDING)nativeStorePipeline(layout.nativePipelineSlots,tail,pipeline);return pipeline;}
+ function getPipeline(vsObj, psObj, vsProg, psProg, layout, rtInfo, dsFormat) {
+ 	const passInfoNow = passInfo;
++	if (!passInfoNow.tailId) {
++		const tail = rtInfo.map((r) => r ? r.format : '-').join(',') + '|' + (dsFormat || '-') + '|' + rtInfo.samples + '|' + (passInfoNow.roDepth ? 'rd' : '') + (passInfoNow.roStencil ? 'rs' : '');
++		let id = internedTails.get(tail);
++		if (id === undefined) { id = internedTails.size + 1; internedTails.set(tail, id); }
++		passInfoNow.tailId = id;
++	}
++ if(nativeCompiledUniforms){
++  if(!layout.nativePipelineSlots)layout.nativePipelineSlots=nativeMakePipelineLayout(new Uint32Array(layout.slots.map(slot=>slot.slot)));
++  const cached=nativeLookupPipeline(layout.nativePipelineSlots,passInfoNow.tailId);if(cached!==undefined)return cached;
++ }
+ 	const topo = TOPOLOGY[S.topo] || TOPOLOGY[4];
+ 	const stripFmt = topo[1] && S.ib.buf ? (S.ib.fmt === 57 ? 'uint16' : 'uint32') : undefined;
+ 	// key: only what the pipeline depends on, built without intermediate arrays (this runs whenever any pipeline state changed, i.e. for most draws)
+@@ -1154,12 +1280,6 @@
+ 		const v = S.vb[lslots[k].slot], o = v.buf ? objs.get(v.buf) : null;
+ 		T[n++] = o && o.gpu ? v.stride : 0;
+ 	}
+-	if (!passInfoNow.tailId) {
+-		const tail = rtInfo.map((r) => r ? r.format : '-').join(',') + '|' + (dsFormat || '-') + '|' + rtInfo.samples + '|' + (passInfoNow.roDepth ? 'rd' : '') + (passInfoNow.roStencil ? 'rs' : '');
+-		let id = internedTails.get(tail);
+-		if (id === undefined) { id = internedTails.size + 1; internedTails.set(tail, id); }
+-		passInfoNow.tailId = id;
+-	}
+ 	T[n++] = S.topo; T[n++] = stripFmt === 'uint16' ? 1 : stripFmt ? 2 : 0; T[n++] = S.blend.id; T[n++] = S.dss.id; T[n++] = S.rs; T[n++] = passInfoNow.tailId;
+ 	let h = n * 0x9e3779b1;
+ 	for (let i = 0; i < n; i++) { h = Math.imul(h ^ T[i], 0x85ebca6b); h ^= h >>> 13; }
+@@ -1171,7 +1291,7 @@
+ 			if (t.length !== n) continue;
+ 			let i = 0;
+ 			while (i < n && t[i] === T[i]) i++;
+-			if (i === n) return bucket[b + 1];
++			if (i === n) return rememberNativePipeline(layout,passInfoNow.tailId,bucket[b + 1]);
+ 		}
+ 	} else pipelineBuckets.set(h, bucket = []);
+ 	// not seen with these state objects: by content (an identical pipeline made for other state objects, or compiled ahead from a recipe: no draw is skipped for it)
+@@ -1184,7 +1304,7 @@
+ 	let c = contentPipelines.get(key);
+ 	if (c) {
+ 		if (c.ahead) { c.ahead = false; aheadUsed++; }
+-		if (c.p !== undefined) { bucket.push(T.slice(0, n), c.p); return c.p; }
++		if (c.p !== undefined) { bucket.push(T.slice(0, n), c.p); return rememberNativePipeline(layout,passInfoNow.tailId,c.p); }
+ 		bucket.push(T.slice(0, n), PIPELINE_PENDING);
+ 		c.waiters.push(bucket, bucket.length - 1);
+ 		return PIPELINE_PENDING;
+@@ -1203,7 +1323,7 @@
+ 	}
+ 	const pl = compileSync(c, desc, vbReq);
+ 	bucket.push(T.slice(0, n), pl);
+-	return pl;
++	return rememberNativePipeline(layout,passInfoNow.tailId,pl);
+ }
+ // The render pipeline for these shaders and states (shared by draws and the compile-ahead queue): { desc, vbReq }.
+ function pipelineDescFor(vsObj, psObj, vsProg, psProg, layout, strides, topoIdx, stripFmt, blendState, dss, rs, rtInfo, dsFormat, roDepth, roStencil) {
+@@ -1370,7 +1490,13 @@
+ 	if (isNode) {
+ 		if (process.env.WGPU_PIPELINE_SEED) seed = JSON.parse(require('fs').readFileSync(process.env.WGPU_PIPELINE_SEED, 'utf8'));
+ 	} else {
+-		try { local = await idbList(await idbOpen()); } catch (e) { logLine('pipeline recipes: no IndexedDB (' + (e && e.message) + ')'); }
++		if (typeof nativeReadText === 'function') {		// native app: one recipe per line in Documents (no IndexedDB in JavaScriptCore); newest last
++			const bundled = typeof nativeReadBundleText === 'function' ? (nativeReadBundleText('pipeline-recipes-seed.jsonl') || '') : '';
++			for (const line of (bundled + '\n' + (nativeReadText('pipeline-recipes.jsonl') || '')).split('\n')) { if (!line) continue; try { local.push(JSON.parse(line)); } catch (e) { /* a torn last line */ } }
++			local.reverse();		// newest first, like the IndexedDB list
++			if (local.length > RECIPES_MAX) local.length = RECIPES_MAX;
++		}
++		else try { local = await idbList(await idbOpen()); } catch (e) { logLine('pipeline recipes: no IndexedDB (' + (e && e.message) + ')'); }
+ 		try { const r = await fetch(shaderUrl + (new URLSearchParams(self.location.search).get('low') === '1' ? '/pipelines_low.json' : '/pipelines.json')); if (r.ok) seed = await r.json(); } catch (e) { /* no seed */ }		// the page's low-memory profile has its own (no shadow pipelines)
+ 	}
+ 	for (const rc of local.concat(seed)) {
+@@ -1386,6 +1512,13 @@
+ async function saveRecipes() {
+ 	if (isNode || !recipesNew.length) return;
+ 	const add = recipesNew.splice(0);
++	if (typeof nativeAppendText === 'function') {
++		let text = '';
++		for (const rc of add) text += JSON.stringify(rc) + '\n';
++		if (nativeAppendText('pipeline-recipes.jsonl', text)) recipesSaved += add.length;
++		else logOnce('recipesave', 'pipeline recipes not saved');
++		return;
++	}
+ 	try {
+ 		const db = await idbOpen();
+ 		const list = (await idbList(db)).concat(add);
+@@ -1397,11 +1530,27 @@
+ 
+ // ---- render pass + draw -----------------------------------------------------------------------------------------------------------
+ let rtKey = null;		// the render-target part of the pass key: rebuilt only after SET_RENDER_TARGETS / a state reset
++const nativePassRecipes = new Map();
++function evictPassRecipe(key){
++ const recipe=nativePassRecipes.get(key);if(!recipe)return;
++ nativePassRecipes.delete(key);
++ for(const resource of recipe.resources)resource.passRecipes?.delete(key);
++}
++function beginPreparedPass(recipe,key){
++ for(const resource of recipe.colors){markColorDirty(resource);usedInEncoder.add(resource);}
++ if(recipe.depth){if(recipe.depthDirty)markDepthDirty(recipe.depth);usedInEncoder.add(recipe.depth);}
++ passKey=key;pdirty=true;flushDrawBatch();
++ pass=nativeBeginRenderPass(getEncoder(),recipe.native);
++ beginOcclusionInPass();passInfo=recipe.info;applied={};passSt=newPassSt();
++ return true;
++}
+ function ensurePass() {
+ 	const key = rtKey || (rtKey = S.rt.map((r) => r.tex + ':' + r.mip + ':' + r.slice + ':' + r.fmt).join(',') + '/' + S.ds.tex + ':' + S.ds.mip + ':' + S.ds.slice + ':' + S.ds.fmt + ':' + S.ds.flags);
+ 	if (pass && key === passKey) return true;
+ 	endPass();
++	if(nativeCompiledUniforms&&nativePreparedPasses){const recipe=nativePassRecipes.get(key);if(recipe&&recipe.queries===occlusion.set)return beginPreparedPass(recipe,key);if(recipe)evictPassRecipe(key);}
+ 	const colorAttachments = [], rtInfo = [];
++	const passColors=[];
+ 	let samples = 1, any = false, passW = 1, passH = 1;
+ 	for (let i = 0; i < 8; i++) {
+ 		const r = S.rt[i];
+@@ -1410,6 +1559,7 @@
+ 		const v = targetView(t, r.fmt, r.mip, r.slice);
+ 		colorAttachments.push({ view: v.view, loadOp: 'load', storeOp: 'store' });
+ 		markColorDirty(t);
++		passColors.push(t);
+ 		rtInfo.push({ format: v.format });
+ 		samples = t.desc.sampleCount; any = true; passW = Math.max(1, t.desc.size.width >> r.mip); passH = Math.max(1, t.desc.size.height >> r.mip);
+ 		usedInEncoder.add(t);
+@@ -1434,9 +1584,16 @@
+ 	rtInfo.samples = samples;
+ 	passKey = key;
+ 	pdirty = true;
+-	pass = getEncoder().beginRenderPass(desc);
+-	beginOcclusionInPass();
+ 	passInfo = { rtInfo, dsFormat, colorCount: colorAttachments.length, roDepth: !!dt && (S.ds.flags & 1) !== 0, roStencil: !!dt && (S.ds.flags & 2) !== 0, width: passW, height: passH };
++	if(nativeCompiledUniforms&&nativePreparedPasses){
++		const resources=passColors.slice();if(dt)resources.push(dt);
++		const recipe={native:nativePrepareRenderPass(desc),info:passInfo,colors:passColors,depth:dt,depthDirty:!!dt&&!(S.ds.flags&3),resources,queries:occlusion.set};
++		nativePassRecipes.set(key,recipe);
++		for(const resource of resources)(resource.passRecipes||(resource.passRecipes=new Set())).add(key);
++		while(nativePassRecipes.size>256)evictPassRecipe(nativePassRecipes.keys().next().value);
++		flushDrawBatch();pass=nativeBeginRenderPass(getEncoder(),recipe.native);
++	}else pass = getEncoder().beginRenderPass(desc);
++	beginOcclusionInPass();
+ 	applied = {};
+ 	passSt = newPassSt();
+ 	return true;
+@@ -1445,28 +1602,42 @@
+ 
+ // refresh depth-as-float proxies before the render pass starts (a refresh is a pass of its own)
+ function prepareDepthProxies(prog, stage) {
+-	const texs = prog.texBindings || (prog.texBindings = prog.info.bindings.filter((b) => b.kind === 'texture'));
+-	if (!texs.length) return;
+-	// Most draws bind no depth texture: once a scan found none, skip it until this stage's bindings or the set of resources change (a proxy that exists must be refreshed every time)
+-	const dp = prog.dpScan || (prog.dpScan = [{ none: false, e: -1, g: -1 }, { none: false, e: -1, g: -1 }, { none: false, e: -1, g: -1 }]), sc = dp[stage];
+-	if (sc.none && sc.e === bindEpoch[stage] && sc.g === gEpoch) return;
+-	let any = false;
+-	for (let i = 0; i < texs.length; i++) {
+-		const b = texs[i];
+-		const id = S.srv[stage][b.binding - 32], srv = id ? objs.get(id) : null;
+-		const t = srv && !srv.isBuf ? objs.get(srv.res) : null;
+-		if (t && t.kind === 'texture' && isDepth(t.format) && b.sample !== 'depth') { any = true; depthProxy(t, b.sample === 'uint' ? 'stencil' : 'depth'); }
+-		else if (t && t.kind === 'texture' && !isDepth(t.format) && b.sample === 'depth') { any = true; floatToDepthProxy(t); }
+-	}
+-	sc.none = !any; sc.e = bindEpoch[stage]; sc.g = gEpoch;
++ const texs=prog.texBindings||(prog.texBindings=prog.info.bindings.filter(b=>b.kind==='texture'));
++ if(!texs.length)return;
++ if(nativeCompiledUniforms){
++  if(!prog.nativeProxyPlan){const data=[];for(const b of texs)data.push(b.binding-32,b.sample==='depth'?1:b.sample==='float'?0:2);prog.nativeProxyPlan=nativeMakeProxyPlan(new Uint32Array(data));}
++  const mask=nativeProxyMask(prog.nativeProxyPlan,stage,gEpoch);if(!mask)return;
++  for(let i=0;i<texs.length;i++)if(mask&(1<<i)){
++   const b=texs[i],srv=objs.get(S.srv[stage][b.binding-32]),t=srv&&!srv.isBuf?objs.get(srv.res):null;if(!t)continue;
++   if(isDepth(t.format)){const px=depthProxy(t,b.sample==='uint'?'stencil':'depth');if(needsFloatProxy(px,b))filterableFloatProxy(px);}else if(b.sample==='depth')floatToDepthProxy(t);else filterableFloatProxy(t);
++  }
++  return;
++ }
++ const scans=prog.dpScan||(prog.dpScan=[{e:-1,g:-1,refs:[]},{e:-1,g:-1,refs:[]},{e:-1,g:-1,refs:[]}]),sc=scans[stage];
++ if(sc.e!==srvEpoch[stage]||sc.g!==gEpoch) {
++  sc.refs.length=0;
++  for(const b of texs) {
++   const srv=objs.get(S.srv[stage][b.binding-32]),t=srv&&!srv.isBuf?objs.get(srv.res):null;
++   if(!t||t.kind!=='texture')continue;
++   const depth=isDepth(t.format);
++   if((depth&&b.sample!=='depth')||(!depth&&b.sample==='depth')||needsFloatProxy(t,b))sc.refs.push({t,b,depth});
++  }
++  sc.e=srvEpoch[stage];sc.g=gEpoch;
++ }
++ for(const r of sc.refs) {
++  if(r.depth){const px=depthProxy(r.t,r.b.sample==='uint'?'stencil':'depth');if(needsFloatProxy(px,r.b))filterableFloatProxy(px);}
++  else if(r.b.sample==='depth')floatToDepthProxy(r.t);
++  else filterableFloatProxy(r.t);
++ }
+ }
+ 
+ // Bind-group fast path: the result of stageBindGroup for a (program, stage) is reused while nothing it depends on changed. bindEpoch[stage] counts binding ops of that stage, gEpoch
+ // counts destructions of textures/buffers that some bind group referenced (bgUse marks them `inBG`), constant buffers are compared by version, and the ring frame must be the same (the
+ // packed constants live in it). Creations do not count: ids are never reused and an object's CREATE op precedes every op that binds it, so nothing a cached result references can
+ // change by a later creation (counting them made streaming, which creates and destroys objects all the time, invalidate every program's fast path).
+-const bindEpoch = [0, 0, 0];
++const bindEpoch = [0, 0, 0], srvEpoch = [0,0,0];
+ let gEpoch = 0, sawProxy = false;
++let nativeResourceEpoch=1,nativePreparedHits=0,nativePreparedMisses=0;
+ let zeroVb = null;
+ const ZERO_VB_SIZE = 4096;
+ function zeroVertexBuffer() { return zeroVb || (zeroVb = device.createBuffer({ size: ZERO_VB_SIZE, usage: GPUBufferUsage.VERTEX })); }
+@@ -1487,14 +1658,19 @@
+ 		else if (b.kind === 'read-only-storage' || b.kind === 'storage') { if (b.binding >= 160) src.push(4, b.binding - (b.binding >= 176 ? 176 : 160)); else src.push(3, b.binding - 32); }
+ 		else if (b.kind === 'storage-texture') src.push(4, b.binding - 160);
+ 	}
+-	return src;
++	return new Uint32Array(src);
+ }
+ function boundId(stage, k, x) { return k === 0 ? S.cb[stage][x].buf : k === 1 ? S.cb[stage][x].first : k === 2 ? S.smp[stage][x] : k === 3 ? S.srv[stage][x] : S.uav[stage][x]; }
+ function readIds(stage, src) { const out = new Array(src.length >> 1); for (let i = 0; i < src.length; i += 2) out[i >> 1] = boundId(stage, src[i], src[i + 1]); return out; }
+ function sameIds(stage, src, ids) { for (let i = 0; i < src.length; i += 2) if (boundId(stage, src[i], src[i + 1]) !== ids[i >> 1]) return false; return true; }
+ function stageBG(stage, prog, group) {
+-	const e = prog.fast && prog.fast[stage];
++	let e = prog.fast && prog.fast[stage];
+ 	const src = (prog.idSrc || (prog.idSrc = []))[group] || (prog.idSrc[group] = idSources(prog, group));
++	let cache=null;
++ if(nativeCompiledUniforms){
++  const caches=prog.nativeCaches||(prog.nativeCaches=[]);cache=caches[group]||(caches[group]={handle:nativeMakeBindingCache(src)});
++  const hit=nativeResolveBindingCache(cache.handle,stage,gEpoch,ubo.frame,ubo.slot,FRAME_SLOTS);if(hit){replayBG(hit);return hit.result;}e=null;
++ }
+ 	if (e && !e.noFast && e.gEpoch === gEpoch && (e.epoch === bindEpoch[stage] || (sameIds(stage, src, e.ids) && (e.epoch = bindEpoch[stage], true)))) {
+ 		// A result is tied to a frame only by its dynamic constant offset, which points into the ring slot of the frame that packed it.
+ 		if (e.frame === ubo.frame || !e.result.dyn.length) {
+@@ -1522,14 +1698,16 @@
+ 	if (result && prog.pack && result.dyn.length === 1) {
+ 		const a = packCopy(prog, stage);		// (a hit: the slow path just packed it) for the chunk the bind group was created with
+ 		const objsList = [], vers = [];
+-		for (const m of prog.pack.members) { const c = S.cb[stage][m.binding], o = c.buf ? objs.get(c.buf) : null; objsList.push(o); vers.push(o ? o.version : -1); }
+-		prog.fast[stage] = { epoch, gEpoch: g, frame: ubo.frame, objs: objsList, vers, result, noFast: sawProxy, chunkId: a ? a.chunk.id : 0, used: bgUsed.slice(), dirty: bgDirty.slice(), ids: readIds(stage, src) };
++		if(!nativeCompiledUniforms)for (const m of prog.pack.members) { const c = S.cb[stage][m.binding], o = c.buf ? objs.get(c.buf) : null; objsList.push(o); vers.push(o ? o.version : -1); }
++		prog.fast[stage] = { epoch, gEpoch: g, frame: ubo.frame, objs: objsList, vers, result, noFast: false, chunkId: a ? a.chunk.id : 0, used: bgUsed.slice(), dirty: bgDirty.slice(), proxyChecks:bgProxyChecks.slice(),proxyCoverage:bgProxyCoverage, ids: nativeCompiledUniforms?null:readIds(stage, src) };
+ 	} else if (result && prog.pack) {
+ 		const objsList = [], vers = [];
+-		for (const m of prog.pack.members) { const c = S.cb[stage][m.binding], o = c.buf ? objs.get(c.buf) : null; objsList.push(o); vers.push(o ? o.version : -1); }
+-		prog.fast[stage] = { epoch, gEpoch: g, frame: ubo.frame, objs: objsList, vers, result, noFast: sawProxy, chunkId: 0, used: bgUsed.slice(), dirty: bgDirty.slice(), ids: readIds(stage, src) };
+-	} else if (result) prog.fast[stage] = { epoch, gEpoch: g, frame: ubo.frame, objs: [], vers: [], result, noFast: sawProxy, chunkId: 0, used: bgUsed.slice(), dirty: bgDirty.slice(), ids: readIds(stage, src) };
++		if(!nativeCompiledUniforms)for (const m of prog.pack.members) { const c = S.cb[stage][m.binding], o = c.buf ? objs.get(c.buf) : null; objsList.push(o); vers.push(o ? o.version : -1); }
++		prog.fast[stage] = { epoch, gEpoch: g, frame: ubo.frame, objs: objsList, vers, result, noFast: false, chunkId: 0, used: bgUsed.slice(), dirty: bgDirty.slice(), proxyChecks:bgProxyChecks.slice(),proxyCoverage:bgProxyCoverage, ids: nativeCompiledUniforms?null:readIds(stage, src) };
++	} else if (result) prog.fast[stage] = { epoch, gEpoch: g, frame: ubo.frame, objs: [], vers: [], result, noFast: false, chunkId: 0, used: bgUsed.slice(), dirty: bgDirty.slice(), proxyChecks:bgProxyChecks.slice(),proxyCoverage:bgProxyCoverage, ids: nativeCompiledUniforms?null:readIds(stage, src) };
+ 	else prog.fast[stage] = null;
++ if(prog.fast[stage])for(const resource of prog.fast[stage].used)(resource.fastPrograms||(resource.fastPrograms=new Set())).add(prog);
++ if(nativeCompiledUniforms&&prog.fast[stage])nativeStoreBindingCache(cache.handle,stage,gEpoch,prog.fast[stage],prog.pack?.native||null,prog.pack?.size||0);
+ 	return result;
+ }
+ 
+@@ -1558,7 +1736,7 @@
+ 	// resources of one stage; returns { bg, dyn } or null
+ 	const dyn = [];
+ 	sbN = 0;
+-	bgUsed.length = 0; bgDirty.length = 0;
++	bgUsed.length = 0; bgDirty.length = 0;bgProxyChecks.length=0;bgProxyCoverage=0;
+ 	const bindings = prog.groupBindings[group] || [];
+ 	// cache key: the layout, the program (its bindings and its constant table) and the stage, then the resource ids of the bindings in order
+ 	bgKeyN = 0;
+@@ -1588,7 +1766,14 @@
+ 			const id = S.srv[stage][b.binding - 32];
+ 			const srv = id ? objs.get(id) : null;
+ 			let v = null;
+-			if (srv && !srv.isBuf) { v = srvView(srv, b); if (v) bgUse(objs.get(srv.res)); }
++			if (srv && !srv.isBuf) {
++    const before=bgProxyChecks.length;v=srvView(srv,b,nativeCompiledUniforms?bgProxyChecks:null);
++    if(bgProxyChecks.length>before){
++     const bits=prog.nativeProxyBits||(prog.nativeProxyBits=new Map(prog.texBindings.map((binding,index)=>[binding.binding,index])));
++     const bit=bits.get(b.binding);if(bit!==undefined)bgProxyCoverage=(bgProxyCoverage|(1<<bit))>>>0;
++    }
++    if(v)bgUse(objs.get(srv.res));
++   }
+ 			ent(b.binding, v || dummyTexture(b), -1, -1);
+ 			bgKey[bgKeyN++] = v ? id : 0;
+ 		} else if (b.kind === 'read-only-storage' || b.kind === 'storage') {
+@@ -1642,7 +1827,8 @@
+ 		if (i === bgKeyN) break;
+ 	}
+ 	if (!e) {
+-		e = { k: bgKey.slice(0, bgKeyN), bg: device.createBindGroup({ layout: bgl, entries: buildEntries() }), next: head || null };
++		e = { k: bgKey.slice(0, bgKeyN), bg: device.createBindGroup({ layout: bgl, entries: buildEntries() }), next: head || null, hash:h, resources:bgUsed.slice() };
++		for(const resource of e.resources)(resource.bindGroups||(resource.bindGroups=new Set())).add(e);
+ 		bgCreated++;
+ 		bindGroupCache.set(h, e);
+ 		trimBindGroups();
+@@ -1651,7 +1837,8 @@
+ }
+ // Side effects of building a bind group that must also happen when stageBG reuses it: the bound resources are in use by this encoder (an upload to them must flush first)
+ // and UAV textures were written (their depth proxies go stale). stageBindGroup collects them here, stageBG keeps a copy with the cached result and replays it.
+-const bgUsed = [], bgDirty = [];
++const bgUsed = [], bgDirty = [], bgProxyChecks=[];
++let bgProxyCoverage=0;
+ function bgUse(o) { if (o) { usedInEncoder.add(o); bgUsed.push(o); o.inBG = true; } }
+ // Bind groups by a 30-bit hash of their numeric key (stageBindGroup), each bucket a chain of { k: key, bg, next }. The string keys this replaced (built by concatenation and
+ // hashed on every lookup) were ~40 % of stageBindGroup, which runs for every draw whose program's previous bindings changed.
+@@ -1663,11 +1850,27 @@
+ // so an entry whose texture was destroyed (streaming does this constantly) is dead weight that would otherwise live forever: in a long session that exhausted the descriptor heaps
+ // (`CreateDescriptorHeap failed with E_OUTOFMEMORY`, device lost, black screen). Keep the newest BG_LIMIT; older ones are rebuilt on demand (cheap).
+ const BG_LIMIT = 24000;
++function unlinkBindGroupResources(entry){for(const resource of entry.resources||[])resource.bindGroups?.delete(entry);}
++function releaseResourceCaches(resource){
++ nativeResourceEpoch++;
++ if(resource.nativeResourceId)nativeForgetResourceUsage(resource.nativeResourceId);
++ if(resource.passRecipes)for(const key of resource.passRecipes)evictPassRecipe(key);
++ resource.passRecipes=null;
++ if(resource.bindGroups)for(const entry of resource.bindGroups){
++  let current=bindGroupCache.get(entry.hash),previous=null;
++  while(current&&current!==entry){previous=current;current=current.next;}
++  if(current){if(previous)previous.next=current.next;else if(current.next)bindGroupCache.set(entry.hash,current.next);else bindGroupCache.delete(entry.hash);bgEvicted++;}
++  unlinkBindGroupResources(entry);
++ }
++ if(resource.fastPrograms)for(const prog of resource.fastPrograms){prog.fast=null;prog.nativeCaches=null;}
++ resource.bindGroups=null;resource.fastPrograms=null;
++}
+ function trimBindGroups() {
+ 	if (bindGroupCache.size <= BG_LIMIT * 1.5) return;
+ 	let drop = bindGroupCache.size - BG_LIMIT;
+-	for (const k of bindGroupCache.keys()) { bindGroupCache.delete(k); bgEvicted++; if (--drop <= 0) break; }
+-	for (const prog of progsWithFast) prog.fast = null;		// the fast path holds bind groups too
++	for (const k of bindGroupCache.keys()) { const head=bindGroupCache.get(k);bindGroupCache.delete(k);for(let entry=head;entry;entry=entry.next)unlinkBindGroupResources(entry);bgEvicted++; if (--drop <= 0) break; }
++	for (const prog of progsWithFast) { prog.fast = null; prog.nativeCaches=null; }		// the fast paths hold bind groups too
++ nativeResourceEpoch++;
+ }
+ const progsWithFast = new Set();
+ 
+@@ -1701,7 +1904,48 @@
+ 	const sc = passSt.sc || (passSt.sc = [0, 0, 0, 0]); sc[0] = x; sc[1] = y; sc[2] = w; sc[3] = h;
+ }
+ 
++let nativeDrawParts=[0,0,0,0],nativeSampledDraws=0,nativePartsFrames=0,nativeDrawSynced=false;
++let nativeWarmSpans=0,nativeWarmPackets=0,nativeWarmDraws=0;
++function nativePreparationReady(){
++ return nativePreparedDraws&&nativeCompiledUniforms&&nativeDrawSynced&&pass&&rtKey&&rtKey===passKey&&passInfo?.tailId&&!nativeDetailedProfile&&!dbgIdx&&!debugDraw&&!debugPs&&nanHuntState!==2&&!shotEvery&&!shotAllRt;
++}
++function tryPreparedDraw(p){
++ if(!nativePreparationReady())return -1;
++ reservePreparedDraw();
++ const index=nativePrepareDraw(p,passInfo.tailId,gEpoch,ubo.frame,ubo.slot,FRAME_SLOTS,encEpoch,nativeResourceEpoch,passInfo.width,passInfo.height);
++ if(index<0){nativePreparedMisses++;return index;}
++ nativeDrawTransaction(pass,index);drawCount++;if(u32[p]>=4)indirectDraws++;nativePreparedHits++;
++ passSt.pl=passSt.bg0=passSt.bg1=null;passSt.dyn0=passSt.dyn1=-2;
++ return index;
++}
++function consumeNativeWarmSpan(tail,head,limit){
++ reservePreparedDraw();
++ const count=nativeConsumeWarmSpan(ringBase,tail,head,ringSize,passInfo.tailId,gEpoch,ubo.frame,ubo.slot,FRAME_SLOTS,encEpoch,nativeResourceEpoch,passInfo.width,passInfo.height,limit);
++ const out=nativeWarmOutput,mask=out[6],vertices=out[7];
++ if(count){nativeWarmSpans++;nativeWarmPackets+=count;nativeWarmDraws+=out[2];}
++ for(let stage=0;stage<3;stage++)if(mask&(1<<stage))S.shader[stage]=stage<2?nativePipelineState[stage]:nativeWarmState[0];
++ if(mask&8)S.layout=nativePipelineState[2];if(mask&16)S.topo=nativePipelineState[3];
++ if(mask&32){S.ib.buf=nativeWarmState[17];S.ib.fmt=nativeWarmState[18];S.ib.offset=nativeWarmState[19];}
++ for(let slot=0;slot<16;slot++)if(vertices&(1<<slot)){const v=S.vb[slot];v.buf=nativePipelineState[8+slot*2];v.stride=nativePipelineState[9+slot*2];v.offset=nativeWarmState[1+slot];}
++ if(out[5])pdirty=true;
++ for(let i=0;i<out[9];i++){const o=objs.get(out[12+i*2]);if(o)o.version+=out[13+i*2];}
++ fr.upBytes+=out[8];drawCount+=out[2];indirectDraws+=out[3];nativePreparedHits+=out[2];nativePreparedMisses+=out[11];
++ if(out[4]!==0xffffffff)nativeWarmTransaction(pass,out[4]);
++ if(out[2]){passSt.pl=passSt.bg0=passSt.bg1=null;passSt.dyn0=passSt.dyn1=-2;}
++ return count;
++}
++function syncNativeDrawState(){
++ if(nativeWarmDispatcher){nativeWarmState[0]=S.shader[2];for(let slot=0;slot<16;slot++)nativeWarmState[1+slot]=S.vb[slot].offset;nativeWarmState[17]=S.ib.buf;nativeWarmState[18]=S.ib.fmt;nativeWarmState[19]=S.ib.offset;}
++ nativeDrawState(25);nativeDrawVertices(0,16,S.vb);nativeDrawState(19,S.ib.buf,S.ib.fmt,S.ib.offset);
++ const vp=S.viewports[0]||[0,0,0,0,0,0],sc=S.scissors[0]||[0,0,0,0];nativeDrawState(20,!!S.viewports.length,vp[0],vp[1],vp[2],vp[3],vp[4],vp[5]);nativeDrawState(21,!!S.scissors.length,sc[0],sc[1],sc[2],sc[3]);
++ nativeDrawState(22,S.blend.factor[0],S.blend.factor[1],S.blend.factor[2],S.blend.factor[3]);nativeDrawState(23,S.dss.ref);const rs=objs.get(S.rs);nativeDrawState(24,rs&&rs.words[7]?1:0);nativeDrawSynced=true;
++}
++function compiledDrawPlan(pl,layout,vsProg){
++ if(!pl.nativeDrawPlan){const data=[vsProg.vid?1:0,vsProg.iid?1:0,layout.slots.length];for(const slot of layout.slots)data.push(slot.slot,slot.cls);const req=pl.vbReq||[];data.push(req.length);for(const r of req)data.push(r.slot,r.stride,r.last,r.instance?1:0);pl.nativeDrawPlan=nativeMakeDrawPlan(new Uint32Array(data));}
++ return pl.nativeDrawPlan;
++}
+ function doDraw(p) {
++ const measure=nativeDetailedProfile&&(drawCount&7)===0; let mark=measure?performance.now():0;
+ 	// kind (0 draw, 1 indexed, 2 instanced, 3 indexed instanced), a..: vertexCount/indexCount, instanceCount, start, baseVertex, startInstance
+ 	let dbgLimit = -1;
+ 	if (dbgIdx) {
+@@ -1720,6 +1964,7 @@
+ 	if (!vsProg || (psObj && !psProg)) { skipDraw('if (!vsProg || (psObj && !psProg)) { skippedDraws++; return;'); return; }
+ 	prepareDepthProxies(vsProg, 0);
+ 	if (psProg) prepareDepthProxies(psProg, 1);
++	if(measure){const now=performance.now();nativeDrawParts[0]+=now-mark;mark=now;}
+ 	if (!ensurePass()) { skipDraw('if (!ensurePass()) { skippedDraws++; return; }'); return; }
+ 	let pl;
+ 	if (!pdirty && lastPl && lastPlPass === passInfo) pl = lastPl;
+@@ -1734,6 +1979,7 @@
+ 		const t0 = passInfo.rtInfo && passInfo.rtInfo[0];
+ 		dbgLastLabel = '#' + (dbgFrameDraw - 1) + ' ' + (pl.label || '?') + ' target ' + (t0 ? t0.format : 'depth only') + ' ' + passInfo.width + 'x' + passInfo.height + ' n=' + count + (inst > 1 ? ' x' + inst : '');
+ 	}
++	if(measure){const now=performance.now();nativeDrawParts[1]+=now-mark;mark=now;}
+ 	// bind groups
+ 	const g0 = vsProg.groupBindings[0] ? stageBG(0, vsProg, 0) : null;
+ 	const g1 = psProg && psProg.groupBindings[1] ? stageBG(1, psProg, 1) : null;
+@@ -1741,6 +1987,12 @@
+ 	if (psProg && psProg.groupBindings[1] && !g1) { skipDraw('if (psProg && psProg.groupBindings[1] && !g1) { skippedDraws'); return; }
+ 	if (g0) { const d = g0.dyn.length ? g0.dyn[0] : -1; if (passSt.bg0 !== g0.bg || passSt.dyn0 !== d) { setBG(pass, 0, g0); passSt.bg0 = g0.bg; passSt.dyn0 = d; } }
+ 	if (g1) { const d = g1.dyn.length ? g1.dyn[0] : -1; if (passSt.bg1 !== g1.bg || passSt.dyn1 !== d) { setBG(pass, 1, g1); passSt.bg1 = g1.bg; passSt.dyn1 = d; } }
++	if(measure){const now=performance.now();nativeDrawParts[2]+=now-mark;mark=now;}
++ if(nativeCompiledUniforms&&!debugDraw&&!debugPs&&nanHuntState!==2){
++  if(!nativeDrawSynced)syncNativeDrawState();
++  nativeDrawPacket(pass,compiledDrawPlan(pl,layout,vsProg),kind,count,inst,start,baseVertex,startInstance,encEpoch,passInfo.width,passInfo.height);
++  if(kind>=4)indirectDraws++;
++ }else{
+ 	// vertex / index buffers (baseVertex and startInstance are folded into the buffer offsets: SV_VertexID is zero based)
+ 	const indexed = kind === 4 || (kind < 4 && (kind & 1) !== 0);
+ 	// D3D's SV_VertexID / SV_InstanceID do not include the draw's base vertex / start instance (and this port treats StartVertexLocation the same); WebGPU's vertex_index / instance_index
+@@ -1817,7 +2069,12 @@
+ 		if (indexed) pass.drawIndexed(dCount, dInst, start, foldV ? 0 : baseVertex, iFirst);
+ 		else pass.draw(dCount, dInst, vFirst, iFirst);
+ 	}
++ }
++	if(measure){nativeDrawParts[3]+=performance.now()-mark;nativeSampledDraws++;}
+ 	drawCount++;
++	if(nativePreparedDraws&&nativeCompiledUniforms&&!nativeDetailedProfile&&pl.nativeDrawPlan&&layout.nativePipelineSlots){
++		nativeRegisterPreparedPipeline(layout.nativePipelineSlots,pl,pl.nativeDrawPlan,passInfo.tailId,nativeResourceEpoch,vsProg.nativeCaches?.[0]?.handle||null,psProg?.nativeCaches?.[1]?.handle||null,vsProg.nativeProxyPlan||null,psProg?.nativeProxyPlan||null,!!vsProg.groupBindings[0],!!psProg?.groupBindings[1]);
++	}
+ 	if (nanHuntState === 2) { nanHuntLabel = vsProg.label + ' + ' + (psProg ? psProg.label : '-') + ' (draw ' + drawCount + ')'; nanHuntPs = psProg; }
+ 	if (shotEvery || shotAllRt) {
+ 		const t0 = S.rt[0].tex ? objs.get(S.rt[0].tex) : null;
+@@ -1980,6 +2237,16 @@
+ 	const ss = subresourceOf(s, srcSub), ds = subresourceOf(d, dstSub);
+ 	const m = mipSize(s, ss.mip);
+ 	const w = hasBox ? r - l : m.w, h = hasBox ? b - t : m.h, dep = hasBox ? bk - f : m.d;
++	if(s.nativeBC&&d.nativeBC&&s.compressedShadow){
++  const sb=blockInfo(s.nativeBC),db=blockInfo(d.nativeBC),dm=mipSize(d,ds.mip),sp=Math.ceil(m.w/4)*sb.bytes,dp=Math.ceil(dm.w/4)*db.bytes,rows=Math.ceil(h/4),bytes=Math.ceil(w/4)*sb.bytes;
++  if(sb.bytes!==db.bytes)throw new Error('Incompatible compressed texture copy');
++  const shadows=d.compressedShadow||(d.compressedShadow=new Map()),threeSource=s.desc.dimension==='3d',threeDestination=d.desc.dimension==='3d';
++  for(let z=0;z<(threeSource?dep:1);z++){
++   const source=s.compressedShadow.get(ss.mip+':'+(threeSource?(hasBox?f:0)+z:ss.layer));if(!source)continue;
++   const key=ds.mip+':'+(threeDestination?dz+z:ds.layer);let target=shadows.get(key);if(!target){target=new Uint8Array(dp*Math.ceil(dm.h/4));shadows.set(key,target);}
++   for(let row=0;row<rows;row++){const from=(Math.floor((hasBox?t:0)/4)+row)*sp+Math.floor((hasBox?l:0)/4)*sb.bytes,to=(Math.floor(dy/4)+row)*dp+Math.floor(dx/4)*db.bytes;if(from+bytes>source.length||to+bytes>target.length)throw new Error('Invalid compressed texture copy range');target.set(source.subarray(from,from+bytes),to);}
++  }
++ }
+ 	const three = s.desc.dimension === '3d';
+ 	if (s.format !== d.format && !three && d.desc.dimension !== '3d' && (blockBytes(s.format) !== 0) !== (blockBytes(d.format) !== 0)
+ 		&& (blockBytes(s.format) || blockBytes(d.format)) === (texelBytesOf(s.format) || texelBytesOf(d.format))) {
+@@ -2002,6 +2269,7 @@
+ 	if (!s || !d) return;
+ 	if (s.kind === 'buffer') { copyRegion(dstId, 0, 0, 0, 0, srcId, 0, 0, 0, 0, 0, 0, 0, 0); return; }
+ 	if (s.kind !== 'texture' || d.kind !== 'texture') return;
++	if(s.nativeBC&&d.nativeBC&&s.compressedShadow)d.compressedShadow=new Map([...s.compressedShadow].map(([key,data])=>[key,data.slice()]));
+ 	endPass();
+ 	const mips = Math.min(s.desc.mipLevelCount, d.desc.mipLevelCount);
+ 	for (let mip = 0; mip < mips; mip++) {
+@@ -2348,6 +2616,17 @@
+ 	const l = u32[p + 3], t = u32[p + 4], f = u32[p + 5], r = u32[p + 6], b = u32[p + 7], bk = u32[p + 8];
+ 	const addr = u32[p + 9] + u32[p + 10] * 4294967296, rowPitch = u32[p + 11], slicePitch = u32[p + 12], isBuf = u32[p + 13], size = u32[p + 14];
+ 	if (!src) return;
++	if(!isBuf&&src.nativeBC){
++  const ss=subresourceOf(src,sub),m=mipSize(src,ss.mip),bi=blockInfo(src.nativeBC),three=src.desc.dimension==='3d';
++  const w=hasBox?r-l:m.w,h=hasBox?b-t:m.h,depth=hasBox?bk-f:m.d,rows=Math.ceil(h/4),pitch=Math.ceil(m.w/4)*bi.bytes,rowBytes=Math.ceil(w/4)*bi.bytes;
++  const layers=three?depth:1;
++  if(rowBytes>rowPitch||(layers>1&&rowPitch*rows>slicePitch)||(size&&((layers-1)*slicePitch+(rows-1)*rowPitch+rowBytes)>size))throw new Error('Invalid compressed readback destination');
++  for(let z=0;z<layers;z++){
++   const shadow=src.compressedShadow?.get(ss.mip+':'+(three?(hasBox?f:0)+z:ss.layer));if(!shadow)throw new Error('Compressed readback has no original blocks');
++   for(let row=0;row<rows;row++){const from=(Math.floor((hasBox?t:0)/4)+row)*pitch+Math.floor((hasBox?l:0)/4)*bi.bytes;if(from+rowBytes>shadow.length)throw new Error('Invalid compressed readback source');u8.set(shadow.subarray(from,from+rowBytes),addr+z*slicePitch+row*rowPitch);}
++  }
++  return;
++ }
+ 	// The copy is recorded into the open encoder, after the commands that produce the data, and that encoder is submitted at once: the engine maps the staging resource soon
+ 	// (often next frame) and deferring the submit to the present made it wait 50-300 ms. One submit per readback (it was the open encoder plus a separate one for the copy).
+ 	if (isBuf) {
+@@ -2372,6 +2651,9 @@
+ 	const x0 = hasBox ? l : 0, y0 = hasBox ? t : 0, z0 = hasBox ? f : 0;
+ 	const w = hasBox ? r - l : mw, h = hasBox ? b - t : mh, d = hasBox ? bk - f : md;
+ 	const bx = Math.ceil(w / bi.bw), by = Math.ceil(h / bi.bh), rowBytes = bx * bi.bytes, bpr = Math.ceil(rowBytes / 256) * 256;
++	if(rowBytes>rowPitch || (d>1&&by*rowPitch>slicePitch) || (size&&((d-1)*slicePitch+(by-1)*rowPitch+rowBytes)>size)) {
++        throw new Error('Texture readback layout mismatch: '+src.format+' (original '+src.nativeBC+'), '+w+'x'+h+'x'+d+', row '+rowBytes+'/'+rowPitch+', slice '+slicePitch+', capacity '+size+', address '+addr);
++    }
+ 	const MU = GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ, rbSize = bpr * by * d;
+ 	const rb = pooledBuffer(rbSize, MU);
+ 	endPass();
+@@ -2639,6 +2921,22 @@
+ 
+ let frameSlotDone = Array(FRAME_SLOTS).fill(null);
+ let presentCount = 0;
++let nativeFrameRequest = null;
++function requestNativeFrame(name) { nativeFrameRequest = name; }
++function setNativePackingMode(enabled) {
++ if(!!enabled!==nativeCompiledUniforms){
++  for(let stage=0;stage<3;stage++)for(let slot=0;slot<16;slot++){const value=S.cb[stage][slot],at=(stage*16+slot)*3;nativeCBState[at]=value.buf;nativeCBState[at+1]=value.first;nativeCBState[at+2]=value.num;}
++  if(enabled)S.cb=sharedConstantBindings;else{S.cb=plainConstantBindings();for(let stage=0;stage<3;stage++)for(let slot=0;slot<16;slot++){const value=S.cb[stage][slot],at=(stage*16+slot)*3;value.buf=nativeCBState[at];value.first=nativeCBState[at+1];value.num=nativeCBState[at+2];}}
++  gEpoch++;for(let stage=0;stage<3;stage++){bindEpoch[stage]++;srvEpoch[stage]++;}
++ }
++ nativeCompiledUniforms=!!enabled;nativeDrawSynced=false;
++ nativeDrawCounter0.set(nativeDrawCounters);
++ for(const prog of progsWithFast){prog.fast=null;prog.nativeCaches=null;}
++ nativeResourceEpoch++;
++ fpsT0=0;busyMs=idleMs=0;nativeDrawParts.fill(0);nativePackMs=0;nativePackSamples=0;nativePartsFrames=0;nativeSampledDraws=0;
++ submits0=submits;flushReasons.clear();errorCount0=errorCount;bgCreated0=bgCreated;pendingSkips0=pendingSkips;clampedDraws0=clampedDraws;pipeCreates0=pipeCreates;pipeMs=0;
++ logLine('constant packing mode: '+(enabled?'compiled':'reference'));
++}
+ let shotEvery = isNode ? +(process.env.WGPU_SHOT_EVERY || 0) : 0;
+ const shotPrefix = isNode ? (process.env.WGPU_SHOT_PREFIX || 'D:/wasm_tmp/shot_') : 'present';
+ const shotAllRt = !isNode && new URLSearchParams(self.location.search).get('shotrt') === '1';		// the page's ?shotrt=1 (with ?shot=N): see present()
+@@ -2662,11 +2960,15 @@
+ 		pass2.end();
+ 	}
+ 	// debugging aid: WGPU_SHOT_EVERY=<n> WGPU_SHOT_PREFIX=<path prefix> writes <prefix><presentNumber>.png every n-th present
+-	presentCount++;
++	presentCount++;nativePartsFrames++;
+ 	{
+ 		const tn = performance.now();
+ 		if (lastPresentT) {
+ 			const dt = tn - lastPresentT;
++			if(typeof nativeRecordFrame==='function'){
++                if(typeof nativeFrameReports!=='undefined'&&nativeFrameReports)nativeRecordFrame(tn,dt,drawCount-nativeFrameDraw0,worldSent,fr.idle,fr.pipe,fr.mod,fr.up,fr.upBytes,fr.wait,fr.flush);
++                else nativeRecordFrame(tn,dt,drawCount-nativeFrameDraw0,worldSent);
++            }
+ 			if (dt > frameMax) frameMax = dt;
+ 			if (dt > 25) over25++;
+ 			if (dt > SPIKE_MS) {
+@@ -2675,6 +2977,7 @@
+ 			}
+ 		}
+ 		lastPresentT = tn;
++		nativeFrameDraw0=drawCount;
+ 		fr.idle = fr.pipe = fr.mod = fr.up = fr.upBytes = fr.wait = fr.flush = 0;
+ 	}
+ 	{	// every 10 s: frame rate and work per frame (visible in the session log)
+@@ -2683,6 +2986,10 @@
+ 		else if (now - fpsT0 >= 10000) {
+ 			const fr = presentCount - fpsCount0;
+ 			logLine('fps: ' + (fr * 1000 / (now - fpsT0)).toFixed(1) + ' (' + fr + ' frames, ' + (((drawCount - fpsDraw0) / Math.max(1, fr)) | 0) + ' draws/frame, ' + ((submits - submits0) / Math.max(1, fr)).toFixed(1) + ' submits/frame: ' + ([...flushReasons].sort((a, b) => b[1] - a[1]).map(([k, n]) => k + ' ' + (n / Math.max(1, fr)).toFixed(1)).join(', ') || 'none') + '), draws waiting for a compiling pipeline +' + (pendingSkips - pendingSkips0) + ', validation errors +' + (errorCount - errorCount0) + ', clamped draws +' + (clampedDraws - clampedDraws0) + ', bind groups +' + (bgCreated - bgCreated0) + ' (cache ' + bindGroupCache.size + ', evicted ' + bgEvicted + '), pipelines +' + (pipeCreates - pipeCreates0) + ' (' + pipeMs.toFixed(0) + ' ms), worker busy ' + (busyMs * 100 / Math.max(1, busyMs + idleMs)).toFixed(0) + '% (' + (busyMs / Math.max(1, fr)).toFixed(1) + ' ms/frame)');
++			if(nativeDetailedProfile)logLine('draw costs estimated ms/frame: proxies '+(nativeDrawParts[0]*8/nativePartsFrames).toFixed(1)+', pass/pipeline '+(nativeDrawParts[1]*8/nativePartsFrames).toFixed(1)+', bindings '+(nativeDrawParts[2]*8/nativePartsFrames).toFixed(1)+', drawing '+(nativeDrawParts[3]*8/nativePartsFrames).toFixed(1)+', constant packing '+(nativePackMs*16/nativePartsFrames).toFixed(1));nativeDrawParts.fill(0);nativePackMs=0;nativePackSamples=0;nativePartsFrames=0;nativeSampledDraws=0;
++			if(nativeCompiledUniforms)logLine('native draw validation: clamped +'+((nativeDrawCounters[0]-nativeDrawCounter0[0])>>>0)+', skipped +'+((nativeDrawCounters[1]-nativeDrawCounter0[1])>>>0)+', issued +'+((nativeDrawCounters[2]-nativeDrawCounter0[2])>>>0));nativeDrawCounter0.set(nativeDrawCounters);
++			if(nativeWarmDispatcher)logLine('native warm spans: '+nativeWarmSpans+', packets '+nativeWarmPackets+', draws '+nativeWarmDraws);nativeWarmSpans=nativeWarmPackets=nativeWarmDraws=0;
++			if(nativePreparedDraws&&nativeCompiledUniforms)logLine('native prepared draws: hits +'+nativePreparedHits+', misses +'+nativePreparedMisses);nativePreparedHits=nativePreparedMisses=0;
+ 			busyMs = idleMs = 0; pipeCreates0 = pipeCreates; pipeMs = 0; bgCreated0 = bgCreated; submits0 = submits; flushReasons.clear(); errorCount0 = errorCount; clampedDraws0 = clampedDraws; pendingSkips0 = pendingSkips;
+ 			if (spikeCount || over25) {
+ 				spikes.sort((a, b) => b.dt - a.dt);
+@@ -2732,7 +3039,7 @@
+ 		skipsAtPresent = pendingSkips;
+ 		if (!isNode && now - recipesSaveT >= 20000) { recipesSaveT = now; saveRecipes(); }
+ 	}
+-	aheadStep();
++	if (!worldSent || isNode) aheadStep();		// native: compiles are synchronous, so ahead-compiling only happens while loading
+ 	// ?shotrt=1 (browser): the world as it is 20 s after its first real frame - the back buffer, then every render target - once, whatever shotEvery says. A slow device presents the world at a few
+ 	// frames per second, so waiting for a multiple of shotEvery took minutes and the tab died first (Chromebook session of 2026-10-06: world from 15:36:05, killed 15:37:15, no dump).
+ 	// And every 10 s from the world's first frame: floatStats() of the float render targets (the picture is cheap, the numbers are what shows why a device renders white).
+@@ -2760,6 +3067,7 @@
+ 		await screenshot(id, shotPrefix + String(presentCount).padStart(6, '0') + '.png');
+ 		for (const tid of (isNode ? process.env.WGPU_SHOT_TEXS || '' : '').split(',').filter(Boolean)) await screenshot(+tid, shotPrefix + 'tex' + tid + '_' + String(presentCount).padStart(6, '0') + '.png');
+ 	}
++	if (nativeFrameRequest) { const name=nativeFrameRequest; nativeFrameRequest=null; await screenshot(id,name+'.png'); }
+ 	flush('present');
+ 	frameSlotDone[ubo.slot] = device.queue.onSubmittedWorkDone();
+ 	ubo.slot = (ubo.slot + 1) % FRAME_SLOTS; ubo.chunk = 0; ubo.off = 0; ubo.frame++;
+@@ -2782,12 +3090,20 @@
+ let sinceYield = 0, executedLocal = 0, lastYieldT = 0;
+ 
+ async function runCommands(tail, head) {
++ let preparedFallbackTail=-1;
++	if(nativeBridgeProfile)nativeProfilePackets(ringBase,tail,head,ringSize);
+ 	// executes [tail, head) (byte offsets relative to ringBase); returns the new tail
+ 	while (tail !== head) {
+ 		const base = ringW + (tail >> 2);
+ 		const op = u32[base], n = u32[base + 1];
+ 		if (op === OP.WRAP) { tail = RING_DATA; continue; }
+ 		const p = base + 2;
++  let warmCount=0;
++  if(nativeWarmDispatcher&&tail!==preparedFallbackTail&&nativeDirectDrawResolver&&!debugCs&&nativePreparationReady()&&shaderSourcesReady()&&(op===12||op===47||(op>=18&&op<=25)||op===32)){
++   warmCount=consumeNativeWarmSpan(tail,head,Math.max(1,512-sinceYield));
++   if(nativeWarmOutput[10]!==0xffffffff)preparedFallbackTail=nativeWarmOutput[10];
++  }
++  if(!warmCount){
+ 		switch (op) {		// numeric labels (OP.* in comments): V8 compiles constant Smi cases to a jump table; `case OP.X` was a chain of property loads and compares per command
+ 		case 0 /* NOP */: case 2 /* INIT */: break;
+ 		case 3 /* CREATE_TEXTURE */: createTexture(u32[p], u32[p + 1], u32[p + 2], u32[p + 3], u32[p + 4], u32[p + 5], u32[p + 6], u32[p + 7], u32[p + 8], u32[p + 9]); break;
+@@ -2798,9 +3114,14 @@
+ 			const o = objs.get(u32[p]);
+ 			if (o) {
+ 				if (o.inBG) gEpoch++;		// a cached bind group may hold a view of it
+-				if (usedInEncoder.has(o)) flush('destroy');
++				if (usedInEncoder.has(o)||(o.kind==='buffer'&&o.gpu&&nativeDrawBufferPending(u32[p]))) flush('destroy');
++				releaseResourceCaches(o);
++				for (const key of ['proxy_filter','proxy_depth','proxy_stencil','proxy_fdepth']) { const px=o[key]; if(px) { px.proxy_filter?.tex.destroy(); px.tex.destroy(); } }
+ 				if (o.tex) { o.tex.destroy(); texBytesAlive -= o.bytes || 0; texCount--; }
+ 				if (o.gpu) { o.gpu.destroy(); bufBytesAlive -= o.bytes || 0; }
++                nativeForgetProxy(u32[p]);
++                if(o.shadow)nativeForgetUniform(u32[p]);
++                if(o.kind==='buffer'){flushDrawBatch();nativeForgetDrawBuffer(u32[p]);}
+ 				objs.delete(u32[p]);
+ 			}
+ 			break;
+@@ -2834,14 +3155,16 @@
+ 		case 16 /* CREATE_STATE */: createState(p, n); break;
+ 		case 17 /* CREATE_SRV */: createSrv(p); break;
+ 		case 18 /* SET_SHADER */: if (u32[p] === 2 && debugCs && (setCsLogged++ < 30)) logLine('SET_SHADER cs -> ' + u32[p + 1] + (objs.get(u32[p + 1]) ? ' (' + objs.get(u32[p + 1]).kind + ' ' + objs.get(u32[p + 1]).hash + ')' : ' (unknown object)'));
+-			if (S.shader[u32[p]] !== u32[p + 1]) { S.shader[u32[p]] = u32[p + 1]; pdirty = true; } break;
+-		case 19 /* SET_INPUT_LAYOUT */: if (S.layout !== u32[p]) { S.layout = u32[p]; pdirty = true; } break;
+-		case 20 /* SET_TOPOLOGY */: if (S.topo !== u32[p]) { S.topo = u32[p]; pdirty = true; } break;
+-		case 21 /* SET_VERTEX_BUFFERS */: { const s = u32[p], c = u32[p + 1]; for (let i = 0; i < c && s + i < 16; i++) { const v = S.vb[s + i]; const nb = u32[p + 2 + i * 3], ns = u32[p + 3 + i * 3]; if (v.stride !== ns || !v.buf !== !nb) pdirty = true; v.buf = nb; v.stride = ns; v.offset = u32[p + 4 + i * 3]; } break; }
+-		case 22 /* SET_INDEX_BUFFER */: if (S.ib.fmt !== u32[p + 1] || !S.ib.buf !== !u32[p]) pdirty = true; S.ib.buf = u32[p]; S.ib.fmt = u32[p + 1]; S.ib.offset = u32[p + 2]; break;
+-		case 23 /* SET_CBUFFERS */: { bindEpoch[u32[p]]++; const st = u32[p], s = u32[p + 1], c = u32[p + 2]; for (let i = 0; i < c && s + i < 16; i++) { const v = S.cb[st][s + i]; v.buf = u32[p + 3 + i * 3]; v.first = u32[p + 4 + i * 3]; v.num = u32[p + 5 + i * 3]; } break; }
+-		case 24 /* SET_SRVS */: { bindEpoch[u32[p]]++; const st = u32[p], s = u32[p + 1], c = u32[p + 2]; for (let i = 0; i < c && s + i < 128; i++) S.srv[st][s + i] = u32[p + 3 + i]; break; }
+-		case 25 /* SET_SAMPLERS */: { bindEpoch[u32[p]]++; const st = u32[p], s = u32[p + 1], c = u32[p + 2]; for (let i = 0; i < c && s + i < 16; i++) S.smp[st][s + i] = u32[p + 3 + i]; break; }
++			if (S.shader[u32[p]] !== u32[p + 1]) { S.shader[u32[p]] = u32[p + 1]; pdirty = true; } if(u32[p]<2)nativePipelineState[u32[p]]=u32[p+1];else if(nativeWarmDispatcher&&u32[p]===2)nativeWarmState[0]=u32[p+1]; break;
++		case 19 /* SET_INPUT_LAYOUT */: if (S.layout !== u32[p]) { S.layout = u32[p]; pdirty = true; } nativePipelineState[2]=u32[p]; break;
++		case 20 /* SET_TOPOLOGY */: if (S.topo !== u32[p]) { S.topo = u32[p]; pdirty = true; } nativePipelineState[3]=u32[p]; break;
++		case 21 /* SET_VERTEX_BUFFERS */: { const s = u32[p], c = u32[p + 1]; for (let i = 0; i < c && s + i < 16; i++) { const v = S.vb[s + i]; const nb = u32[p + 2 + i * 3], ns = u32[p + 3 + i * 3]; if (v.stride !== ns || !v.buf !== !nb) pdirty = true; v.buf = nb; v.stride = ns; v.offset = u32[p + 4 + i * 3]; nativePipelineState[8+(s+i)*2]=nb;nativePipelineState[9+(s+i)*2]=ns;if(nativeWarmDispatcher)nativeWarmState[1+s+i]=v.offset; } if(nativeCompiledUniforms)nativeDrawVertices(s,Math.min(c,16-s),S.vb); break; }
++		case 22 /* SET_INDEX_BUFFER */: if (S.ib.fmt !== u32[p + 1] || !S.ib.buf !== !u32[p]) pdirty = true; S.ib.buf = u32[p]; S.ib.fmt = u32[p + 1]; S.ib.offset = u32[p + 2]; nativePipelineState[7]=S.ib.buf?(S.ib.fmt===57?1:2):0; if(nativeWarmDispatcher){nativeWarmState[17]=S.ib.buf;nativeWarmState[18]=S.ib.fmt;nativeWarmState[19]=S.ib.offset;} if(nativeCompiledUniforms)nativeDrawState(19,S.ib.buf,S.ib.fmt,S.ib.offset); break;
++		case 23 /* SET_CBUFFERS */: case 24 /* SET_SRVS */: case 25 /* SET_SAMPLERS */: {
++   if(nativeCompiledUniforms){const count=nativeDecodeBindings(ringBase,tail,head,ringSize);if(count){tail=nativeDecodedBindings[0]-n*4-8;executedLocal+=count-1;sinceYield+=count-1;break;}}
++   if(op===23) {const st=u32[p],s=u32[p+1],c=u32[p+2];let changed=false;for(let i=0;i<c&&s+i<16;i++){const v=S.cb[st][s+i],buf=u32[p+3+i*3],first=u32[p+4+i*3],num=u32[p+5+i*3];if(v.buf!==buf||v.first!==first||v.num!==num){changed=true;v.buf=buf;v.first=first;v.num=num;const at=(st*16+s+i)*3;nativeCBState[at]=buf;nativeCBState[at+1]=first;nativeCBState[at+2]=num;}}if(changed)bindEpoch[st]++;} else if(op===24) {const st=u32[p],s=u32[p+1],c=u32[p+2];let changed=false;for(let i=0;i<c&&s+i<128;i++){const id=u32[p+3+i];if(S.srv[st][s+i]!==id){S.srv[st][s+i]=id;changed=true;}}if(changed){bindEpoch[st]++;srvEpoch[st]++;}} else {const st=u32[p],s=u32[p+1],c=u32[p+2];let changed=false;for(let i=0;i<c&&s+i<16;i++){const id=u32[p+3+i];if(S.smp[st][s+i]!==id){S.smp[st][s+i]=id;changed=true;}}if(changed)bindEpoch[st]++;}
++   break;
++  }
+ 		case 26 /* SET_RENDER_TARGETS */: {
+ 			for (let i = 0; i < 8; i++) { const r = S.rt[i]; r.tex = u32[p + i * 4]; r.mip = u32[p + 1 + i * 4]; r.slice = u32[p + 2 + i * 4]; r.fmt = u32[p + 3 + i * 4]; }
+ 			const q = p + 32, d = S.ds; d.tex = u32[q]; d.mip = u32[q + 1]; d.slice = u32[q + 2]; d.fmt = u32[q + 3]; d.flags = u32[q + 4];
+@@ -2849,12 +3172,12 @@
+ 			pdirty = true;
+ 			break;
+ 		}
+-		case 27 /* SET_BLEND */: { if (S.blend.id !== u32[p]) pdirty = true; const b = S.blend, f = b.factor; b.id = u32[p]; f[0] = f32[p + 1]; f[1] = f32[p + 2]; f[2] = f32[p + 3]; f[3] = f32[p + 4]; b.mask = u32[p + 5]; break; }		// in place: these state ops run between most draws, a new object each time fed the GC
+-		case 28 /* SET_DEPTH_STENCIL */: if (S.dss.id !== u32[p]) pdirty = true; S.dss.id = u32[p]; S.dss.ref = u32[p + 1]; break;
+-		case 29 /* SET_RASTER */: if (S.rs !== u32[p]) pdirty = true; S.rs = u32[p]; break;
+-		case 30 /* SET_VIEWPORTS */: { const c = u32[p], vs = S.viewports; vs.length = c; for (let i = 0; i < c; i++) { const v = vs[i] || (vs[i] = [0, 0, 0, 0, 0, 0]); for (let k = 0; k < 6; k++) v[k] = f32[p + 1 + i * 6 + k]; } break; }
+-		case 31 /* SET_SCISSORS */: { const c = u32[p], ss = S.scissors; ss.length = c; for (let i = 0; i < c; i++) { const r = ss[i] || (ss[i] = [0, 0, 0, 0]); for (let k = 0; k < 4; k++) r[k] = u32[p + 1 + i * 4 + k]; } break; }
+-		case 32 /* DRAW */: if (!isNode && !shaderSourcesReady()) { await ensureShaderSources(); refreshViews(); } doDraw(p); if (debugPsProbe) { await probeSmallSrvs(); refreshViews(); } if (debugDraw && drawCount > debugDraw && drawCount <= debugDraw + debugDrawN) { await probeTarget(); refreshViews(); } if (nanHuntState === 2) { await nanScanAfterDraw(); refreshViews(); } break;
++		case 27 /* SET_BLEND */: { if (S.blend.id !== u32[p]) pdirty = true; const b = S.blend, f = b.factor; b.id = u32[p]; f[0] = f32[p + 1]; f[1] = f32[p + 2]; f[2] = f32[p + 3]; f[3] = f32[p + 4]; b.mask = u32[p + 5]; nativePipelineState[4]=b.id; if(nativeCompiledUniforms)nativeDrawState(22,f[0],f[1],f[2],f[3]); break; }		// in place: these state ops run between most draws, a new object each time fed the GC
++		case 28 /* SET_DEPTH_STENCIL */: if (S.dss.id !== u32[p]) pdirty = true; S.dss.id = u32[p]; S.dss.ref = u32[p + 1]; nativePipelineState[5]=S.dss.id; if(nativeCompiledUniforms)nativeDrawState(23,S.dss.ref); break;
++		case 29 /* SET_RASTER */: if (S.rs !== u32[p]) pdirty = true; S.rs = u32[p]; nativePipelineState[6]=S.rs; if(nativeCompiledUniforms){const rs=objs.get(S.rs);nativeDrawState(24,rs&&rs.words[7]?1:0);} break;
++		case 30 /* SET_VIEWPORTS */: { const c = u32[p], vs = S.viewports; vs.length = c; for (let i = 0; i < c; i++) { const v = vs[i] || (vs[i] = [0, 0, 0, 0, 0, 0]); for (let k = 0; k < 6; k++) v[k] = f32[p + 1 + i * 6 + k]; } if(nativeCompiledUniforms){const v=vs[0]||[0,0,0,0,0,0];nativeDrawState(20,!!c,v[0],v[1],v[2],v[3],v[4],v[5]);} break; }
++		case 31 /* SET_SCISSORS */: { const c = u32[p], ss = S.scissors; ss.length = c; for (let i = 0; i < c; i++) { const r = ss[i] || (ss[i] = [0, 0, 0, 0]); for (let k = 0; k < 4; k++) r[k] = u32[p + 1 + i * 4 + k]; } if(nativeCompiledUniforms){const r=ss[0]||[0,0,0,0];nativeDrawState(21,!!c,r[0],r[1],r[2],r[3]);} break; }
++		case 32 /* DRAW */: { const fallback=tail===preparedFallbackTail;preparedFallbackTail=-1;if (!isNode && !shaderSourcesReady()) { await ensureShaderSources(); refreshViews(); } if(!fallback&&tryPreparedDraw(p)>=0)break; doDraw(p); if (debugPsProbe) { await probeSmallSrvs(); refreshViews(); } if (debugDraw && drawCount > debugDraw && drawCount <= debugDraw + debugDrawN) { await probeTarget(); refreshViews(); } if (nanHuntState === 2) { await nanScanAfterDraw(); refreshViews(); } break;}
+ 		case 33 /* CLEAR_STATE */: resetState(); break;
+ 		case 37 /* CREATE_UAV */: createUav(p); break;
+ 		case 41 /* GENERATE_MIPS */: generateMips(u32[p]); break;
+@@ -2878,7 +3201,9 @@
+ 		}
+ 		executedLocal++;		// published in batches (statistics only): an atomic add per command was measurable at ~25,000 commands per frame
+ 		tail += n * 4 + 8;
+-		if (++sinceYield >= 512) {
++  sinceYield++;
++  }else{tail=nativeWarmOutput[0];executedLocal+=warmCount;sinceYield+=warmCount;}
++		if (sinceYield >= 512) {
+ 			sinceYield = 0;
+ 			Atomics.add(i32, ringW + 3, executedLocal); executedLocal = 0;
+ 			Atomics.store(i32, ringW + 1, tail);		// let the producers reuse the ring space already consumed
+@@ -2907,7 +3232,7 @@
+ 		const head = Atomics.load(i32, hi);
+ 		if (head === tail) {
+ 			if (pendingEvents.length || pendingResolve.length) { flush('idle'); onSubmitted(); }		// nobody is producing: let waiting fences/queries finish
+-			aheadStep();		// pipelines compiled ahead (while the game loads, the worker is mostly idle)
++			if (!worldSent || isNode) aheadStep();		// pipelines compiled ahead (while the game loads, the worker is mostly idle)
+ 			const w0 = performance.now();
+ 			// producers only notify while `sleeping` (header word 5) is set (wgpu_backend.cpp Publish): set it, then re-read head so a command published in between is not missed
+ 			Atomics.store(i32, hi + 5, 1);
+@@ -2931,6 +3256,7 @@
+ 
+ async function start(msg) {
+ 	logLine('start: ring ' + msg.ring + ' size ' + msg.size + ' canvas ' + !!msg.canvas + ' shaders ' + msg.shaderUrl);
++	logLine('native renderer modes: '+JSON.stringify({warm_dispatch:!!nativeWarmDispatcher&&!!nativeCompiledUniforms&&!!nativePreparedDraws&&!nativeDetailedProfile&&!!nativeDirectDrawResolver,fixed_state_packing:!!nativeFixedStatePacking,constant_content_cache:!!nativeConstantContentCache,prepared_proxies:!!nativeCompiledUniforms&&!!nativePreparedDraws&&!nativeDetailedProfile&&!!nativePreparedProxyDraws,binding_cache:nativeHashedBindingCache?"hash128":"linear32",metal_buffer_offsets:!!nativeMetalBufferOffsets,compiled_uniforms:!!nativeCompiledUniforms,pass_cache:!!nativeCompiledUniforms&&!!nativePreparedPasses,prepared_draws:!!nativeCompiledUniforms&&!!nativePreparedDraws&&!nativeDetailedProfile,cached_usage_stamps:!!nativeCompiledUniforms&&!!nativePreparedDraws&&!nativeDetailedProfile&&!!nativeCachedUsageStamps,direct_resolver:!!nativeCompiledUniforms&&!!nativePreparedDraws&&!nativeDetailedProfile&&!!nativeDirectDrawResolver,resource_usage:!!nativeCompiledUniforms&&!!nativePreparedDraws&&!nativeDetailedProfile&&!!nativeResourceMarkers}));
+ 	mem = msg.memory;
+ 	if (msg.shaderUrl) shaderUrl = msg.shaderUrl;
+ 	if (!isNode && msg.shotEvery) shotEvery = msg.shotEvery;
