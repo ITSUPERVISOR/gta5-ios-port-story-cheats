@@ -104,6 +104,10 @@ Settings (gear icon, top centre) has graphics presets and resolution, touch cont
 - Touch input feeds the engine's own controller code, so GTA's controller features (assisted aim, analog driving) work.
 - Game files stream from your server into a block cache in the app.
 
+## Community
+
+This project is published as is and is **not actively maintained**, so it will most likely not get updates or support. The Telegram community [t.me/reGRANDTA](https://t.me/reGRANDTA) may be able to help with setup questions and anything else; it is not run by this project's author.
+
 ## License
 
 The code written for this project is MIT licensed (see `LICENSE`). It does not cover the game, its data, or the third-party files fetched at build time.
