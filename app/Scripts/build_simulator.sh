@@ -1,11 +1,11 @@
 #!/bin/sh
 set -eu
 cd "$(dirname "$0")/.."
-python3 Scripts/prepare_renderer.py --simulator
 python3 Scripts/prepare_heap_diagnostics.py
 python3 Scripts/prepare_memory_pressure.py
 python3 Scripts/prepare_virtual_pad.py
 python3 Scripts/prepare_unchecked_memory.py
+python3 Scripts/build_metal_shaders.py "${PG_SHADER_DIR:-Build/Inputs/shaders}" --sdk iphonesimulator
 xcodegen generate --spec project.yml
 xcodebuild -project PlayGTA5Native.xcodeproj -scheme PlayGTA5Native \
   -configuration Release -sdk iphonesimulator \

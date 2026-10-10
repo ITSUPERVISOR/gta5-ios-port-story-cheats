@@ -4,3 +4,4 @@ Build/
 Resources/manifest.json
 *.xcuserstate
 xcuserdata/
+GeneratedResources/

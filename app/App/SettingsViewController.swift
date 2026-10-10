@@ -6,14 +6,24 @@ final class SettingsViewController: UITableViewController {
     private let settings = GameSettings.shared
     private let engineRunning: Bool
     private let bootPreset: GraphicsPreset
+    /// The mode the running engine started in (nil before Play).
+    private let runningMode: GameMode?
     var resolutionChanged: (() -> Void)?
     var controlsChanged: (() -> Void)?
     var targetingChanged: (() -> Void)?
+    var gameModeChanged: (() -> Void)?
 
-    private enum Section: Int, CaseIterable { case graphics, controls, gyro, device }
+    private enum Section: Int, CaseIterable { case mode, graphics, controls, gyro, files, device }
+    private let preloader = AssetPreloader.shared
+    /// Rows shown in the Game files section, rebuilt from the preloader's phase.
+    private enum FileRow { case status, start, pause, resume, cancel, remove }
+    private var fileRows: [FileRow] = []
+    private var fileStateKey = ""
+    private var fileMessage: String?
 
-    init(engineRunning: Bool) {
+    init(engineRunning: Bool, runningMode: GameMode? = nil) {
         self.engineRunning = engineRunning
+        self.runningMode = engineRunning ? runningMode : nil
         self.bootPreset = GameSettings.shared.graphicsPreset
         super.init(style: .insetGrouped)
         title = "Settings"
@@ -26,25 +36,43 @@ final class SettingsViewController: UITableViewController {
         super.viewDidLoad()
         navigationItem.rightBarButtonItem = UIBarButtonItem(systemItem: .done, primaryAction: UIAction { [weak self] _ in self?.dismiss(animated: true) })
         tableView.register(UITableViewCell.self, forCellReuseIdentifier: "cell")
+        fileRows = makeFileRows()
+        NotificationCenter.default.addObserver(self, selector: #selector(preloadChanged), name: .assetPreloadChanged, object: nil)
+        preloader.refresh()
+        let arguments = ProcessInfo.processInfo.arguments
+        if let i = arguments.firstIndex(of: "--settings-section"), i + 1 < arguments.count, arguments[i + 1] == "files" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                self.tableView.scrollToRow(at: IndexPath(row: 0, section: Section.files.rawValue), at: .top, animated: false)
+            }
+        }
     }
 
     override func numberOfSections(in tableView: UITableView) -> Int { Section.allCases.count }
 
     override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
         switch Section(rawValue: section)! {
+        case .mode: return GameMode.allCases.count
         case .graphics: return settings.tier.allowed.count + 3
         case .controls: return 6
         case .gyro: return (settings.gyroAim == .off ? 1 : 3) + (settings.tiltSteer == .off ? 1 : 2)
+        case .files: return fileRows.count
         case .device: return 1
         }
     }
 
     override func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
-        ["Graphics", "Touch controls", "Gyro", "This device"][section]
+        ["Game mode", "Graphics", "Touch controls", "Gyro", "Game files", "This device"][section]
     }
 
     override func tableView(_ tableView: UITableView, titleForFooterInSection section: Int) -> String? {
         switch Section(rawValue: section)! {
+        case .mode:
+            var text = "Story mode saves stay on this phone between launches. Sandbox keeps its own separate files."
+            if let runningMode {
+                text = "Changes apply the next time you start the game. " + text
+                if settings.gameMode != runningMode { text += " Close and reopen the app to play \(settings.gameMode.title)." }
+            }
+            return text
         case .graphics:
             var text = "Resolution changes apply right away. "
             text += engineRunning ? "Preset and frame rate changes apply the next time you start the game." : "Presets apply when you press Play."
@@ -55,6 +83,7 @@ final class SettingsViewController: UITableViewController {
             return "Controls act as a game controller, so the game's own aim assist and analog steering work. Assisted aim locks onto targets like on a console."
         case .gyro:
             return "Move the phone to fine-tune your aim; turning your body turns the camera. Tilt steering turns the phone like a steering wheel: Assist adds fine control on top of the touch steering, Tilt to steer replaces it. The straight-ahead angle is however you hold the phone when you get in."
+        case .files: return filesFooter()
         case .device: return nil
         }
     }
@@ -66,6 +95,11 @@ final class SettingsViewController: UITableViewController {
         content.secondaryTextProperties.color = .secondaryLabel
         let presets = settings.tier.allowed
         switch Section(rawValue: indexPath.section)! {
+        case .mode:
+            let mode = GameMode.allCases[indexPath.row]
+            content.text = mode.title + (mode == runningMode ? " (playing now)" : "")
+            content.secondaryText = mode.detail
+            cell.accessoryType = settings.gameModeChoice == mode ? .checkmark : .none
         case .graphics:
             if indexPath.row < presets.count {
                 let preset = presets[indexPath.row]
@@ -197,6 +231,8 @@ final class SettingsViewController: UITableViewController {
                 cell.accessoryView = toggle(settings.gyroInvertY, label: "Invert vertical gyro") { [weak self] in self?.settings.gyroInvertY = $0 }
                 cell.selectionStyle = .none
             }
+        case .files:
+            configureFileCell(cell, &content, fileRows[indexPath.row])
         case .device:
             content.text = settings.tier.summary
             content.textProperties.font = .preferredFont(forTextStyle: .footnote)
@@ -209,11 +245,186 @@ final class SettingsViewController: UITableViewController {
 
     override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
+        if indexPath.section == Section.mode.rawValue {
+            settings.gameMode = GameMode.allCases[indexPath.row]
+            gameModeChanged?()
+            tableView.reloadSections([Section.mode.rawValue], with: .none)
+            return
+        }
+        if indexPath.section == Section.files.rawValue { selectFileRow(fileRows[indexPath.row]); return }
         let presets = settings.tier.allowed
         guard indexPath.section == Section.graphics.rawValue, indexPath.row < presets.count else { return }
         settings.graphicsPreset = presets[indexPath.row]
         resolutionChanged?()
         tableView.reloadSections([Section.graphics.rawValue], with: .none)
+    }
+
+    // MARK: Game files
+
+    private func makeFileRows() -> [FileRow] {
+        let phase = preloader.phase
+        let hasFiles = preloader.cachedBytes > 0
+        switch phase {
+        case .unavailable: return [.status]
+        case .idle: return hasFiles ? [.start, .remove] : [.start]
+        case .downloading: return [.status, .pause, .cancel]
+        case .paused: return [.status, .resume, .cancel] + (hasFiles ? [.remove] : [])
+        case .complete: return [.status, .remove]
+        }
+    }
+
+    @objc private func preloadChanged() {
+        let rows = makeFileRows()
+        let section = Section.files.rawValue
+        // Footer text depends on these; a footer only resizes on a reload.
+        let key = "\(rows)|\(preloader.phase)|\(preloader.removing)|\(preloader.lastError ?? "")|\(fileMessage ?? "")|\(preloader.measured)|\(preloader.cachedBytes > 0)"
+        if rows != fileRows || key != fileStateKey {
+            fileRows = rows
+            fileStateKey = key
+            UIView.performWithoutAnimation { tableView.reloadSections([section], with: .none) }
+            return
+        }
+        // Same rows: refresh the visible text in place (no flicker).
+        for (row, kind) in rows.enumerated() {
+            guard let cell = tableView.cellForRow(at: IndexPath(row: row, section: section)) else { continue }
+            var content = cell.defaultContentConfiguration()
+            content.secondaryTextProperties.color = .secondaryLabel
+            configureFileCell(cell, &content, kind)
+            cell.contentConfiguration = content
+        }
+    }
+
+    private func progressText() -> String {
+        let percent = Int((preloader.fraction * 100).rounded(.down))
+        var text = "\(percent)% · \(AssetPreloader.format(preloader.cachedBytes)) of \(AssetPreloader.format(preloader.totalBytes))"
+        if preloader.phase == .downloading {
+            if let rate = preloader.bytesPerSecond { text += " · \(AssetPreloader.format(UInt64(rate)))/s" }
+            if let seconds = preloader.secondsRemaining { text += " · " + AssetPreloader.formatDuration(seconds) }
+        }
+        return text
+    }
+
+    private func configureFileCell(_ cell: UITableViewCell, _ content: inout UIListContentConfiguration, _ row: FileRow) {
+        let total = preloader.measured ? AssetPreloader.format(preloader.totalBytes) : "Checking size"
+        switch row {
+        case .status:
+            cell.selectionStyle = .none
+            switch preloader.phase {
+            case .unavailable(let reason):
+                content.text = "Download all game files"
+                content.secondaryText = reason
+                content.textProperties.color = .secondaryLabel
+            case .complete:
+                content.text = "All files on device"
+                content.secondaryText = "\(total) · plays without streaming"
+                content.image = UIImage(systemName: "checkmark.circle.fill")
+                content.imageProperties.tintColor = .systemGreen
+            case .downloading:
+                content.text = "Downloading game files"
+                content.secondaryText = progressText()
+                cell.accessoryView = progressView()
+            default:
+                content.text = preloader.lastError == nil ? "Download paused" : "Download stopped"
+                content.secondaryText = progressText()
+                cell.accessoryView = progressView()
+            }
+        case .start:
+            content.text = "Download all game files"
+            content.textProperties.color = .tintColor
+            if preloader.cachedBytes > 0 && preloader.measured {
+                content.secondaryText = "\(total) · \(AssetPreloader.format(preloader.cachedBytes)) already on this iPhone"
+            } else {
+                content.secondaryText = total
+            }
+            content.image = UIImage(systemName: "arrow.down.circle")
+        case .pause:
+            content.text = "Pause"
+            content.textProperties.color = .tintColor
+            content.image = UIImage(systemName: "pause.circle")
+        case .resume:
+            content.text = "Resume download"
+            content.textProperties.color = .tintColor
+            content.image = UIImage(systemName: "arrow.down.circle")
+        case .cancel:
+            content.text = "Cancel download"
+            content.secondaryText = "Keeps what is already downloaded"
+            content.textProperties.color = .systemRed
+            content.image = UIImage(systemName: "xmark.circle")
+            content.imageProperties.tintColor = .systemRed
+        case .remove:
+            content.text = preloader.removing ? "Removing files…" : "Remove downloaded files"
+            content.secondaryText = engineRunning ? "Available after restarting the app" : "Frees \(AssetPreloader.format(preloader.cachedBytes))"
+            content.textProperties.color = engineRunning ? .secondaryLabel : .systemRed
+            content.image = UIImage(systemName: "trash")
+            content.imageProperties.tintColor = engineRunning ? .secondaryLabel : .systemRed
+            cell.selectionStyle = engineRunning ? .none : .default
+        }
+    }
+
+    private func progressView() -> UIProgressView {
+        let bar = UIProgressView(progressViewStyle: .default)
+        bar.frame.size.width = 110
+        bar.progress = Float(preloader.fraction)
+        bar.accessibilityLabel = "Download progress"
+        return bar
+    }
+
+    private func filesFooter() -> String {
+        var text = ""
+        if let message = fileMessage ?? preloader.lastError { text = message + "\n\n" }
+        switch preloader.phase {
+        case .unavailable: return text
+        case .complete:
+            text += "The game reads everything from this iPhone. Removing the files frees the space; the game then streams again."
+        default:
+            text += "Saves the whole game on this iPhone (\(preloader.measured ? AssetPreloader.format(preloader.totalBytes) : "about 21 GB")) so it no longer streams from the server. Tailscale must be connected while it downloads. Keep the app open: in the background the download pauses after a short while and continues when you come back. You can play while it downloads."
+            if preloader.cachedBytes > 0 && preloader.phase != .downloading {
+                text += " Removing files also clears the startup set; the next Play prepares it again."
+            }
+        }
+        return text
+    }
+
+    private func selectFileRow(_ row: FileRow) {
+        fileMessage = nil
+        switch row {
+        case .status: return
+        case .start, .resume:
+            let start = { [weak self] in
+                guard let self else { return }
+                if let message = self.preloader.start() { self.showAlert("Can't download", message) }
+            }
+            if row == .start {
+                let alert = UIAlertController(title: "Download all game files?",
+                    message: "This saves \(AssetPreloader.format(preloader.missingBytes)) more on this iPhone (\(AssetPreloader.format(preloader.availableBytes())) free). Wi-Fi and Tailscale recommended.",
+                    preferredStyle: .alert)
+                alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+                alert.addAction(UIAlertAction(title: "Download", style: .default) { _ in start() })
+                present(alert, animated: true)
+            } else { start() }
+        case .pause: preloader.pause()
+        case .cancel: preloader.cancel()
+        case .remove:
+            guard !engineRunning else { return }
+            let alert = UIAlertController(title: "Remove downloaded files?",
+                message: "Frees \(AssetPreloader.format(preloader.cachedBytes)). The game will stream from the server again.",
+                preferredStyle: .alert)
+            alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+            alert.addAction(UIAlertAction(title: "Remove", style: .destructive) { [weak self] _ in
+                guard let self else { return }
+                self.preloader.removeDownloads { message in
+                    if let message { self.showAlert("Can't remove files", message) }
+                }
+            })
+            present(alert, animated: true)
+        }
+        preloadChanged()
+    }
+
+    private func showAlert(_ title: String, _ message: String) {
+        let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "OK", style: .default))
+        present(alert, animated: true)
     }
 
     private func currentSizeText() -> String {

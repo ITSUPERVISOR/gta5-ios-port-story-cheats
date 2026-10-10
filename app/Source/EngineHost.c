@@ -24,6 +24,9 @@ static char *manifestPath;
 static char missingImport[256];
 static _Atomic uint64_t inputBlock;
 static int configuredWidth=960,configuredHeight=540,configuredFrameLimit=2;
+// Start mode for the engine's loading-screen choice (WasmInputBlock.startMode):
+// 1 Story Mode, 2 Sandbox Mode on the GTA V map. Read by f569 (game_36.c).
+static int configuredStartMode=2;
 static _Atomic uint64_t audioRing;
 static _Atomic uint32_t audioCapacity;
 static _Atomic bool started;
@@ -236,7 +239,11 @@ void w2c_env_wasm_input_publish_js(struct w2c_env *host, u64 block) {
   atomic_store((_Atomic int32_t *)(base + 424), -1);
   atomic_store((_Atomic int32_t *)(base + 432), configuredWidth);
   atomic_store((_Atomic int32_t *)(base + 436), configuredHeight);
-  atomic_store((_Atomic int32_t *)(base + 440), benchmarkEnabled()?1:2);
+  // The engine reads this word where it would ask for Story/Sandbox on the
+  // loading screen. Benchmarks always use the release (story) startup.
+  int startMode=benchmarkEnabled()?1:configuredStartMode;
+  atomic_store((_Atomic int32_t *)(base + 440), startMode);
+  pg_log(startMode==1?"Start mode: Story Mode (continues the newest save, or a new game from the Prologue).":"Start mode: Sandbox Mode on the GTA V map.");
   atomic_store(&inputBlock, block);
   pg_log("Native controller bridge attached to the game's input block.");
 }
@@ -398,6 +405,10 @@ void PGConfigureEngine(const char *const *quality,unsigned count,int width,int h
   if(width>=320&&width<=3840&&height>=180&&height<=2160){configuredWidth=width&~1;configuredHeight=height&~1;}
   if(frameLimit>=0&&frameLimit<=4)configuredFrameLimit=frameLimit;
 }
+void PGSetStartMode(int32_t mode){
+  if(atomic_load(&started))return;
+  if(mode==1||mode==2)configuredStartMode=mode;
+}
 void PGSetBackBufferSize(int width,int height){
   uint64_t block=atomic_load(&inputBlock);
   if(!block||width<320||height<180||width>3840||height>2160)return;
@@ -529,6 +540,8 @@ void pg_record_trap(int code) {
 
 #include "NativeGraphics.h"
 uint32_t PGGraphicsNotify(uint64_t address){return pg_atomic_notify(&env.memory,address,UINT32_MAX);}
+// The native Metal renderer sleeps on the ring head word like an engine thread (timeout in nanoseconds, -1: none).
+uint32_t PGGraphicsWait(uint64_t address,uint32_t expected,int64_t timeoutNs){return pg_atomic_wait32(&env.memory,address,expected,(uint64_t)timeoutNs);}
 void w2c_env_wgpu_start_worker(struct w2c_env *host,u64 ring,u64 size,u64 debug){
   pg_log("Connecting game graphics commands to native Metal.");
   PGStartGraphics((void *)env.memory.data,env.memory.max_pages*env.memory.page_size,ring,size,debug);

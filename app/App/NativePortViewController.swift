@@ -18,6 +18,7 @@ final class NativePortViewController: UIViewController, MTKViewDelegate {
     private let fpsLabel = UILabel()
     private var lastFPSLabelUpdate: CFTimeInterval = 0
     private let launchButton = UIButton(type: .system)
+    private let preloadLabel = UILabel()
     private let audioEngine = AVAudioEngine()
     private var audioSource: AVAudioSourceNode?
     private var displayLink: CADisplayLink?
@@ -31,6 +32,9 @@ final class NativePortViewController: UIViewController, MTKViewDelegate {
     private let serverButton = UIButton(type: .system)
     private var engineStarted = false
     private var bootedPreset = GameSettings.shared.graphicsPreset
+    private var bootedMode: GameMode?
+    private let modePicker = UISegmentedControl(items: GameMode.allCases.map(\.title))
+    private let modeDetail = UILabel()
     private var stableTimer: Timer?
     private var padProof: PGPadState?
     private var tiltNeutral: Double?
@@ -112,14 +116,34 @@ final class NativePortViewController: UIViewController, MTKViewDelegate {
         serverButton.addAction(UIAction { [weak self] _ in self?.askForAssetServer() }, for: .touchUpInside)
         updateServerStatus()
         if !GameSettings.shared.assetServer.isEmpty { testAssetServer() }
+        // Debug/automation: --game-mode story|sandbox picks the mode before Play.
+        let arguments = ProcessInfo.processInfo.arguments
+        if let index = arguments.firstIndex(of: "--game-mode"), index + 1 < arguments.count {
+            GameSettings.shared.gameMode = arguments[index + 1] == "story" ? .story : .sandbox
+        }
+        modePicker.accessibilityLabel = "Game mode"
+        modePicker.overrideUserInterfaceStyle = .dark
+        modePicker.addAction(UIAction { [weak self] _ in
+            guard let self, self.modePicker.selectedSegmentIndex >= 0 else { return }
+            GameSettings.shared.gameMode = GameMode.allCases[self.modePicker.selectedSegmentIndex]
+            self.refreshModeChoice()
+        }, for: .valueChanged)
+        modeDetail.font = .preferredFont(forTextStyle: .footnote)
+        modeDetail.textColor = .lightGray
+        modeDetail.numberOfLines = 0
+        refreshModeChoice()
+        preloadLabel.font = .monospacedDigitSystemFont(ofSize: 13, weight: .regular)
+        preloadLabel.textColor = .lightGray
+        preloadLabel.numberOfLines = 0
+        preloadLabel.isHidden = true
         // The log (when shown) takes the spare height; everything else hugs its content.
-        for item in [title, subtitle, serverButton, launchButton, settingsButton, controllerLabel] as [UIView] {
+        for item in [title, subtitle, serverButton, modePicker, modeDetail, launchButton, settingsButton, preloadLabel, controllerLabel] as [UIView] {
             item.setContentHuggingPriority(.required, for: .vertical)
             item.setContentCompressionResistancePriority(.required, for: .vertical)
         }
         let spacer = UIView()
         spacer.setContentHuggingPriority(.defaultLow, for: .vertical)
-        let stack = UIStackView(arrangedSubviews: [title, subtitle, serverButton, launchButton, settingsButton, controllerLabel, output, spacer])
+        let stack = UIStackView(arrangedSubviews: [title, subtitle, serverButton, modePicker, modeDetail, launchButton, settingsButton, preloadLabel, controllerLabel, output, spacer])
         stack.setCustomSpacing(20, after: subtitle)
         stack.setCustomSpacing(16, after: serverButton)
         diagnosticsOverlay = stack
@@ -185,12 +209,27 @@ final class NativePortViewController: UIViewController, MTKViewDelegate {
             fpsLabel.isHidden = false
             touchControls.isHidden = false
         }
+        NotificationCenter.default.addObserver(self, selector: #selector(preloadChanged), name: .assetPreloadChanged, object: nil)
+        // Continue an unfinished "Download all game files" after a relaunch.
+        AssetPreloader.shared.resumeIfNeeded()
+        if ProcessInfo.processInfo.arguments.contains("--preload-autostart") {
+            // Debug: start the download without tapping (simulator checks).
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                if let message = AssetPreloader.shared.start() { self.appendLog("Preload refused: " + message) }
+            }
+        }
         if ProcessInfo.processInfo.arguments.contains("--open-settings") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.showSettings() }
         }
         if ProcessInfo.processInfo.arguments.contains("--boot-engine") {
             DispatchQueue.main.async { self.startEngine() }
         }
+    }
+
+    @objc private func preloadChanged() {
+        let summary = AssetPreloader.shared.launchSummary
+        preloadLabel.text = summary
+        preloadLabel.isHidden = summary == nil
     }
 
     func appendLog(_ line: String) {
@@ -247,8 +286,20 @@ final class NativePortViewController: UIViewController, MTKViewDelegate {
         if !output.text.isEmpty { output.scrollRangeToVisible(NSRange(location: output.text.utf16.count - 1, length: 1)) }
     }
 
+    /// The launch screen asks for a mode once; after that it remembers it.
+    private func refreshModeChoice() {
+        let choice = GameSettings.shared.gameModeChoice
+        modePicker.selectedSegmentIndex = choice.flatMap { GameMode.allCases.firstIndex(of: $0) } ?? UISegmentedControl.noSegment
+        modeDetail.text = choice?.detail ?? "Choose Story mode or Sandbox to play."
+        if !engineStarted { launchButton.isEnabled = choice != nil }
+    }
+
     @objc private func startEngine() {
-        guard let path = Bundle.main.path(forResource: "manifest", ofType: "json") else {
+        if GameSettings.shared.gameModeChoice == nil {
+            // Automated launches without a choice keep the old sandbox start.
+            guard ProcessInfo.processInfo.arguments.contains("--boot-engine") else { return }
+        }
+        guard let path = EnginePaths.manifest else {
             appendLog("Asset manifest is missing from the app bundle.")
             return
         }
@@ -259,7 +310,12 @@ final class NativePortViewController: UIViewController, MTKViewDelegate {
         PGAttachMetalLayer(Unmanaged.passUnretained(metalView.layer).toOpaque())
         launchButton.isEnabled = false
         settingsButton.isHidden = true
+        modePicker.isEnabled = false
         engineStarted = true
+        let mode = GameSettings.shared.gameMode
+        bootedMode = mode
+        PGSetStartMode(Int32(mode.rawValue))
+        appendLog("Game mode: \(mode.title)")
         bootedPreset = GameSettings.shared.graphicsPreset
         appendLog("Graphics: " + GraphicsConfiguration.apply(GameSettings.shared, screen: view.bounds.size))
         appendLog("Device: " + GameSettings.shared.tier.summary)
@@ -267,8 +323,10 @@ final class NativePortViewController: UIViewController, MTKViewDelegate {
         launchButton.setTitle("Loading…", for: .disabled); launchButton.setNeedsUpdateConfiguration()
         appendLog("Native touch controls support held buttons, sprint and weapon selection.")
         startAudio()
-        let root = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("EngineFiles").path
+        let (root, rootNote) = EnginePaths.filesRoot()
+        if let rootNote { appendLog(rootNote) }
         PGSetAssetServer(GameSettings.shared.assetServer)
+        AssetPreloader.shared.engineRunning = true
         path.withCString { manifest in
             root.withCString { PGStartEngine(manifest, $0, engineLog, Unmanaged.passUnretained(self).toOpaque()) }
         }
@@ -345,6 +403,10 @@ final class NativePortViewController: UIViewController, MTKViewDelegate {
             audioSource = source
             audioEngine.attach(source)
             audioEngine.connect(source, to: audioEngine.mainMixerNode, format: format)
+            #if targetEnvironment(simulator)
+            // Simulator runs are silent unless --sound is passed (test runs play through the Mac's speakers).
+            if !ProcessInfo.processInfo.arguments.contains("--sound") { audioEngine.mainMixerNode.outputVolume = 0 }
+            #endif
             try audioEngine.start()
         } catch { appendLog("Native audio setup failed: \(error.localizedDescription)") }
     }
@@ -400,7 +462,8 @@ final class NativePortViewController: UIViewController, MTKViewDelegate {
     private func showSettings() {
         guard presentedViewController == nil else { return }
         touchControls.reset()
-        let controller = SettingsViewController(engineRunning: engineStarted)
+        let controller = SettingsViewController(engineRunning: engineStarted, runningMode: bootedMode)
+        controller.gameModeChanged = { [weak self] in self?.refreshModeChoice() }
         controller.resolutionChanged = { [weak self] in self?.applyLiveResolution() }
         controller.controlsChanged = { [weak self] in self?.touchControls.updateVisibility() }
         controller.targetingChanged = { PGSetTargetingMode(Int32(GameSettings.shared.targetingMode)) }

@@ -14,9 +14,7 @@ JOBS="${JOBS:-$(sysctl -n hw.ncpu)}"
 PY="${PYTHON:-/usr/bin/python3}"
 
 "$PY" Scripts/fetch_game_files.py --server "$SERVER" --out Build/Inputs/mirror
-"$PY" Scripts/fetch_dawn.py
-"$PY" Scripts/apply_renderer_patch.py
-"$PY" Scripts/prepare.py --mirror Build/Inputs/mirror --prebuilt-dawn
+"$PY" Scripts/prepare.py --mirror Build/Inputs/mirror
 # The app opens with your server already filled in.
 /usr/libexec/PlistBuddy -c "Set :PGDefaultAssetServer $SERVER" App/Info.plist
 

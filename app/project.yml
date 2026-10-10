@@ -21,16 +21,7 @@ settings:
       - PG_UNCHECKED_MEMORY=1
       - WASM_RT_SKIP_SIGNAL_RECOVERY=1
       - WASM_RT_MAX_CALL_STACK_DEPTH=10000
-    DAWN_BUILD_DIRECTORY: $(SRCROOT)/Build/Dawn-iOS
-    "DAWN_BUILD_DIRECTORY[sdk=iphonesimulator*]": $(SRCROOT)/Build/Dawn-Simulator
-    OTHER_LDFLAGS:
-      - $(inherited)
-      - -lwebgpu_dawn
-    LIBRARY_SEARCH_PATHS:
-      - $(DAWN_BUILD_DIRECTORY)/src/dawn/native
     HEADER_SEARCH_PATHS:
-      - $(DAWN_BUILD_DIRECTORY)/gen/include
-      - $(SRCROOT)/Tools/dawn/include
       - $(SRCROOT)/Source
       - $(SRCROOT)/Generated
       - $(SRCROOT)/Tools/wabt-1.0.42/include
@@ -62,8 +53,10 @@ targets:
       - path: Tools/wabt-1.0.42/share/wabt/wasm2c/wasm-rt-exceptions-impl.c
       - path: Resources
         buildPhase: resources
+      - path: GeneratedResources
+        buildPhase: resources
+        optional: true
     dependencies:
-      - sdk: JavaScriptCore.framework
       - sdk: QuartzCore.framework
       - sdk: Metal.framework
       - sdk: IOSurface.framework
@@ -83,13 +76,13 @@ targets:
       path: App/Info.plist
       properties:
         CFBundleDisplayName: GTA V Port
-        CFBundleShortVersionString: "1.0"
+        CFBundleShortVersionString: "1.1"
         # Your game-file server may be a plain-http address on your tailnet.
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
         # Filled in by the cloud build so you don't have to type it.
         PGDefaultAssetServer: ""
-        CFBundleVersion: "1"
+        CFBundleVersion: "2"
         UILaunchScreen: {}
         UIRequiresFullScreen: true
         UISupportedInterfaceOrientations:

@@ -1,5 +1,20 @@
 import Foundation
 
+/// How the engine starts: the same two choices as the web build's loading
+/// screen (Story Mode / Sandbox Mode). Raw values are the engine's start mode.
+enum GameMode: Int, CaseIterable {
+    case story = 1
+    case sandbox = 2
+
+    var title: String { self == .story ? "Story mode" : "Sandbox" }
+    var detail: String {
+        switch self {
+        case .story: return "The campaign with missions. Continues your latest save, or starts from the Prologue."
+        case .sandbox: return "Free roam anywhere on the map with every weapon. No missions."
+        }
+    }
+}
+
 /// Player preferences, kept in UserDefaults across launches.
 final class GameSettings {
     static let shared = GameSettings()
@@ -69,6 +84,17 @@ final class GameSettings {
         set { defaults.set(newValue, forKey: "targetingMode") }
     }
     static let targetingTitles = ["Traditional lock-on", "Assisted aim", "Assisted free aim", "Free aim"]
+
+    /// nil until the player has chosen on the launch screen.
+    var gameModeChoice: GameMode? {
+        get { (defaults.object(forKey: "gameMode") as? Int).flatMap(GameMode.init) }
+        set { defaults.set(newValue?.rawValue, forKey: "gameMode") }
+    }
+    /// Sandbox was the only mode before the choice existed.
+    var gameMode: GameMode {
+        get { gameModeChoice ?? .sandbox }
+        set { gameModeChoice = newValue }
+    }
 
     // Graphics. The default comes from the measured device tier.
     lazy var tier = DeviceTier.probe()

@@ -8,6 +8,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include "NativePackedAssetCache.h"
+#include "NativeAssetPreload.h"
 
 // The server that holds your own copy of the game files (set in the app).
 static NSString *assetServer=@"";
@@ -53,6 +54,7 @@ static uint64_t hintsNormalSeen,hintsLowSeen,hintsScheduled,hintsCached,hintsLap
 static _Thread_local double assetReadNetworkMS,assetReadLockMS;
 static _Thread_local uint64_t assetReadNetworkBytes;
 static _Thread_local unsigned assetReadSource;
+static _Thread_local bool assetSizeMismatch;
 static double assetNowMS(void){return NSProcessInfo.processInfo.systemUptime*1000;}
 #ifdef PG_ASSET_TEST_HOOK
 static void (*assetFillTestHook)(uint32_t,uint64_t);
@@ -62,7 +64,11 @@ static BOOL assetBlockInFlight(PGAssetCondition *condition,uint64_t block){
   return NO;
 }
 
+static _Atomic bool assetsConfigured;
 void pg_assets_configure(const char *manifest,const char *root) {
+  // The Settings preloader may configure the same cache before Play; the
+  // engine's later call then reuses it (same manifest and root).
+  if(atomic_exchange(&assetsConfigured,true))return;
   @autoreleasepool {
     NSData *data=[NSData dataWithContentsOfFile:@(manifest)];
     NSDictionary *parsed=[NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
@@ -227,7 +233,7 @@ static int64_t readAssetPackedLocked(uint32_t id,uint64_t offset,uint8_t *destin
         } @finally {
           if(assetConcurrentFills){[condition lock];[condition.flights removeObjectIdenticalTo:flight];[condition broadcast];}
         }
-        if(actualSize!=size){pg_log("Asset range size disagrees with immutable manifest.");return -1;}
+        if(actualSize!=size){pg_log("Asset range size disagrees with immutable manifest.");assetSizeMismatch=true;return -1;}
       }
       uint64_t wanted=MIN((end+1)*4096,size)-start;
       if(!run||run.length!=wanted)return -1;
@@ -267,7 +273,9 @@ static int64_t readAsset(uint32_t id,uint64_t offset,uint8_t *destination,uint32
   if(assetTimingFD>=0&&atomic_fetch_add(&assetTimingRecords,1)<200000){char record[256];int n=snprintf(record,sizeof record,"%.3f,%.3f,%u,%llu,%u,%lld,%u,%u,%.3f,%.3f,%llu\n",start,assetNowMS(),id,offset,length,result,assetReadSource,assetPrefetchRead,assetReadNetworkMS,assetReadLockMS,assetReadNetworkBytes);if(n>0&&n<sizeof record)write(assetTimingFD,record,(size_t)n);}
   return result;
 }
+static _Atomic bool assetEngineBooted;
 void pg_assets_prewarm(void){
+  atomic_store(&assetEngineBooted,true);
 #if TARGET_OS_SIMULATOR
   if(!assetStreamSimulation||[NSProcessInfo.processInfo.arguments containsObject:@"--skip-asset-warm"]){pg_log("Simulator startup asset warming skipped.");return;}
 #endif
@@ -422,4 +430,199 @@ void w2c_env_wasm_httpfs_io_start_js(struct w2c_env *host,u64 table) {
   pg_log("Native asset request queue attached; files cached on the phone.");
   for(int i=0;i<6;i++){pthread_t thread;pthread_create(&thread,NULL,assetLoop,(void *)(intptr_t)i);pthread_detach(thread);}
   if(assetQueuedHints){pthread_t thread;pthread_create(&thread,NULL,assetHintLoop,NULL);pthread_detach(thread);pg_log("Native upcoming asset queue enabled: 16 hints, at most 4 speculative; demand reads take priority.");}
+}
+
+// MARK: Download all game files (see NativeAssetPreload.h)
+
+void PGAssetCachePrepare(const char *manifestPath,const char *filesRoot){pg_assets_configure(manifestPath,filesRoot);}
+bool PGAssetPreloadSupported(void){
+  if(!assetFiles.count||!packedRoot)return false;
+#if TARGET_OS_SIMULATOR
+  return assetStreamSimulation;
+#else
+  return true;
+#endif
+}
+// Files whose server size disagrees with the bundled manifest can never be
+// cached (the engine rejects them too). They are remembered in the cache
+// directory and left out of the plan so it can still complete.
+static NSMutableIndexSet *preloadUnavailable;
+static pthread_mutex_t preloadUnavailableLock=PTHREAD_MUTEX_INITIALIZER;
+static NSString *preloadUnavailablePath(void){return [cacheRoot stringByAppendingPathComponent:@"preload-unavailable.txt"];}
+static NSIndexSet *preloadUnavailableIDs(void){
+  pthread_mutex_lock(&preloadUnavailableLock);
+  if(!preloadUnavailable){
+    preloadUnavailable=[NSMutableIndexSet indexSet];
+    NSString *text=[NSString stringWithContentsOfFile:preloadUnavailablePath() encoding:NSUTF8StringEncoding error:nil];
+    for(NSString *line in [text componentsSeparatedByString:@"\n"])if(line.length)[preloadUnavailable addIndex:(NSUInteger)line.integerValue];
+  }
+  NSIndexSet *copy=[preloadUnavailable copy];pthread_mutex_unlock(&preloadUnavailableLock);return copy;
+}
+static bool preloadMarkUnavailable(uint32_t id){
+  preloadUnavailableIDs();
+  pthread_mutex_lock(&preloadUnavailableLock);
+  if([preloadUnavailable containsIndex:id]){pthread_mutex_unlock(&preloadUnavailableLock);return false;}
+  [preloadUnavailable addIndex:id];NSMutableString *text=[NSMutableString string];
+  [preloadUnavailable enumerateIndexesUsingBlock:^(NSUInteger index,BOOL *stop){[text appendFormat:@"%lu\n",(unsigned long)index];}];
+  [text writeToFile:preloadUnavailablePath() atomically:YES encoding:NSUTF8StringEncoding error:nil];
+  pthread_mutex_unlock(&preloadUnavailableLock);return true;
+}
+static NSArray<NSNumber *> *preloadSelection(const char *filter){
+  NSIndexSet *unavailable=preloadUnavailableIDs();
+  NSArray<NSString *> *prefixes=nil;
+  if(filter&&*filter){NSMutableArray *list=[NSMutableArray array];for(NSString *part in [@(filter) componentsSeparatedByString:@","])if(part.length)[list addObject:part];prefixes=list;}
+  NSMutableArray<NSNumber *> *ids=[NSMutableArray arrayWithCapacity:assetFiles.count];
+  for(NSUInteger i=0;i<assetFiles.count;i++){
+    if(prefixes){BOOL match=NO;NSString *path=assetFiles[i][0];for(NSString *prefix in prefixes)if([path hasPrefix:prefix]){match=YES;break;}if(!match)continue;}
+    if([unavailable containsIndex:i])continue;
+    [ids addObject:@(i)];
+  }
+  return ids;
+}
+static uint64_t preloadPresent(uint32_t id,uint64_t offset,uint64_t length){
+  uint64_t size=[assetFiles[id][1] unsignedLongLongValue];
+  NSString *base=[packedRoot stringByAppendingPathComponent:[NSString stringWithFormat:@"%u",id]];
+  return pg_packed_present_bytes([base stringByAppendingString:@".data"].fileSystemRepresentation,[base stringByAppendingString:@".map"].fileSystemRepresentation,size,offset,length);
+}
+void PGAssetPreloadMeasure(const char *filter,uint64_t *totalBytes,uint64_t *cachedBytes,uint32_t *fileCount){
+  uint64_t total=0,cached=0;uint32_t files=0;
+  if(assetFiles.count&&packedRoot){@autoreleasepool {
+    for(NSNumber *identity in preloadSelection(filter)){
+      uint32_t id=identity.unsignedIntValue;uint64_t size=[assetFiles[id][1] unsignedLongLongValue];
+      total+=size;files++;if(size)cached+=preloadPresent(id,0,size);
+    }
+  }}
+  if(totalBytes)*totalBytes=total;if(cachedBytes)*cachedBytes=cached;if(fileCount)*fileCount=files;
+}
+
+static pthread_mutex_t preloadLock=PTHREAD_MUTEX_INITIALIZER;
+static NSArray<NSNumber *> *preloadIDs;
+static NSUInteger preloadCursorFile;
+static uint64_t preloadCursorOffset;
+static _Atomic bool preloadStop,preloadExhausted;
+static _Atomic int preloadRunning;
+static _Atomic unsigned preloadLanes=4;
+static _Atomic uint64_t preloadTotal,preloadCached,preloadDownloaded,preloadReported;
+static _Atomic unsigned preloadConsecutiveFailures;
+static _Atomic int32_t preloadError;
+static const uint32_t preloadSpan=1024*1024;
+
+// Next missing span, in manifest order. Whole files already on the device are
+// skipped with one presence-map check.
+static bool preloadNextSpan(uint32_t *id,uint64_t *offset,uint32_t *length){
+  pthread_mutex_lock(&preloadLock);bool found=false;
+  while(!found&&preloadCursorFile<preloadIDs.count){
+    uint32_t file=preloadIDs[preloadCursorFile].unsignedIntValue;uint64_t size=[assetFiles[file][1] unsignedLongLongValue];
+    if(preloadCursorOffset==0&&(!size||preloadPresent(file,0,size)==size)){preloadCursorFile++;continue;}
+    if(preloadCursorOffset>=size){preloadCursorFile++;preloadCursorOffset=0;continue;}
+    *id=file;*offset=preloadCursorOffset;*length=(uint32_t)MIN((uint64_t)preloadSpan,size-preloadCursorOffset);
+    preloadCursorOffset+=*length;found=true;
+  }
+  pthread_mutex_unlock(&preloadLock);return found;
+}
+static void preloadFail(int32_t error,const char *message){
+  int32_t none=PGAssetPreloadErrorNone;atomic_compare_exchange_strong(&preloadError,&none,error);
+  atomic_store(&preloadStop,true);pg_log(message);
+}
+static void *preloadLane(void *context){
+  unsigned lane=(unsigned)(uintptr_t)context;
+  char name[32];snprintf(name,sizeof name,"gta.asset.preload.%u",lane);pthread_setname_np(name);
+  // Same low URL priority as speculative engine hints: demand reads go first.
+  assetPrefetchRead=assetSpeculativeRead=true;
+  uint8_t *scratch=malloc(preloadSpan);
+  if(!scratch)preloadFail(PGAssetPreloadErrorStorage,"Asset preload: out of memory for a download buffer.");
+  while(scratch&&!atomic_load(&preloadStop)){
+    if(atomic_load(&preloadExhausted))break;
+    if(lane>=atomic_load(&preloadLanes)){usleep(250000);continue;}
+    uint32_t id,length;uint64_t offset;
+    if(!preloadNextSpan(&id,&offset,&length)){atomic_store(&preloadExhausted,true);break;}
+    @autoreleasepool {
+      if([preloadUnavailableIDs() containsIndex:id])continue;
+      uint64_t before=preloadPresent(id,offset,length);
+      if(before==length)continue;
+      bool stored=false;
+      bool unavailable=false;
+      for(unsigned attempt=0;attempt<4&&!atomic_load(&preloadStop);attempt++){
+        assetSizeMismatch=false;
+        if(attempt){for(unsigned wait=0;wait<(4u<<attempt)&&!atomic_load(&preloadStop);wait++)usleep(250000);}
+        int64_t actual=readAsset(id,offset,scratch,length);
+        if(assetSizeMismatch){unavailable=true;break;}
+        if(actual!=length)continue;
+        // readAsset can still return bytes when the packed write failed (it
+        // falls back to the old cache). Only a published span counts.
+        if(preloadPresent(id,offset,length)!=length){preloadFail(PGAssetPreloadErrorStorage,"Asset preload: cache write did not persist; stopping (storage full?).");break;}
+        stored=true;break;
+      }
+      if(unavailable){
+        // Drop the whole file from this run's plan and every later one.
+        if(preloadMarkUnavailable(id)){
+        uint64_t size=[assetFiles[id][1] unsignedLongLongValue],present=preloadPresent(id,0,size);
+        atomic_fetch_sub(&preloadTotal,size);atomic_fetch_sub(&preloadCached,present);
+        pthread_mutex_lock(&preloadLock);if(preloadCursorFile<preloadIDs.count&&preloadIDs[preloadCursorFile].unsignedIntValue==id){preloadCursorFile++;preloadCursorOffset=0;}pthread_mutex_unlock(&preloadLock);
+        char line[PATH_MAX+96];snprintf(line,sizeof line,"Asset preload: %s differs in size from the manifest on the server; skipped.",[assetFiles[id][0] UTF8String]);pg_log(line);
+        }
+      }else if(stored){
+        atomic_store(&preloadConsecutiveFailures,0);
+        atomic_fetch_add(&preloadDownloaded,length-before);
+        uint64_t cached=atomic_fetch_add(&preloadCached,length-before)+length-before,total=atomic_load(&preloadTotal);
+        uint64_t percent=total?cached*100/total:100,reported=atomic_load(&preloadReported);
+        if(percent>=reported+5&&atomic_compare_exchange_strong(&preloadReported,&reported,percent)){char line[160];snprintf(line,sizeof line,"ASSET_PRELOAD_PROGRESS %llu %.1f %.1f",percent,cached/1048576.0,total/1048576.0);pg_log(line);}
+      }else if(!atomic_load(&preloadStop)&&atomic_fetch_add(&preloadConsecutiveFailures,1)+1>=3){
+        preloadFail(PGAssetPreloadErrorNetwork,"Asset preload: the asset server did not answer; stopping.");
+      }
+    }
+  }
+  free(scratch);
+  if(atomic_fetch_sub(&preloadRunning,1)==1){
+    // Last lane out re-measures: engine demand fills count too.
+    uint64_t total=0,cached=0;uint32_t files=0;
+    pthread_mutex_lock(&preloadLock);NSArray<NSNumber *> *ids=preloadIDs;pthread_mutex_unlock(&preloadLock);
+    @autoreleasepool {NSIndexSet *unavailable=preloadUnavailableIDs();for(NSNumber *identity in ids){uint32_t file=identity.unsignedIntValue;if([unavailable containsIndex:file])continue;uint64_t size=[assetFiles[file][1] unsignedLongLongValue];total+=size;files++;if(size)cached+=preloadPresent(file,0,size);}}
+    atomic_store(&preloadCached,cached);atomic_store(&preloadTotal,total);
+    // Went through the whole plan without a pause and still missing bytes:
+    // some spans kept failing. Say so instead of looking merely paused.
+    int32_t none=PGAssetPreloadErrorNone;
+    if(cached<total&&atomic_load(&preloadExhausted)&&!atomic_load(&preloadStop))atomic_compare_exchange_strong(&preloadError,&none,PGAssetPreloadErrorNetwork);
+    char line[224];snprintf(line,sizeof line,"Asset preload stopped: %.1f / %.1f MB on device across %u files, %.1f MB downloaded this run, error %d.",cached/1048576.0,total/1048576.0,files,atomic_load(&preloadDownloaded)/1048576.0,atomic_load(&preloadError));pg_log(line);
+    if(cached==total)pg_log("ASSET_PRELOAD_COMPLETE");
+  }
+  return NULL;
+}
+bool PGAssetPreloadStart(const char *filter,unsigned lanes){
+  if(!PGAssetPreloadSupported())return false;
+  int idle=0;if(!atomic_compare_exchange_strong(&preloadRunning,&idle,-1))return true;
+  lanes=MAX(1u,MIN(6u,lanes));
+  NSArray<NSNumber *> *ids=preloadSelection(filter);uint64_t total=0,cached=0;
+  for(NSNumber *identity in ids){uint32_t file=identity.unsignedIntValue;uint64_t size=[assetFiles[file][1] unsignedLongLongValue];total+=size;if(size)cached+=preloadPresent(file,0,size);}
+  pthread_mutex_lock(&preloadLock);preloadIDs=ids;preloadCursorFile=0;preloadCursorOffset=0;pthread_mutex_unlock(&preloadLock);
+  atomic_store(&preloadTotal,total);atomic_store(&preloadCached,cached);atomic_store(&preloadDownloaded,0);
+  atomic_store(&preloadReported,total?cached*100/total:100);atomic_store(&preloadConsecutiveFailures,0);
+  atomic_store(&preloadError,PGAssetPreloadErrorNone);atomic_store(&preloadStop,false);atomic_store(&preloadExhausted,false);atomic_store(&preloadLanes,lanes);
+  char line[200];snprintf(line,sizeof line,"Asset preload started: %.1f / %.1f MB already on device across %lu files, %u lanes.",cached/1048576.0,total/1048576.0,(unsigned long)ids.count,lanes);pg_log(line);
+  atomic_store(&preloadRunning,6);
+  for(unsigned i=0;i<6;i++){pthread_t thread;if(pthread_create(&thread,NULL,preloadLane,(void *)(uintptr_t)i)){atomic_fetch_sub(&preloadRunning,1);continue;}pthread_detach(thread);}
+  return true;
+}
+void PGAssetPreloadStop(void){atomic_store(&preloadStop,true);}
+void PGAssetPreloadSetLanes(unsigned lanes){atomic_store(&preloadLanes,MAX(1u,MIN(6u,lanes)));}
+PGAssetPreloadStatus PGAssetPreloadGetStatus(void){
+  PGAssetPreloadStatus status={0};int running=atomic_load(&preloadRunning);
+  status.running=running!=0;status.totalBytes=atomic_load(&preloadTotal);status.cachedBytes=atomic_load(&preloadCached);
+  status.downloadedBytes=atomic_load(&preloadDownloaded);status.error=atomic_load(&preloadError);
+  return status;
+}
+bool PGAssetCacheRemoveAll(uint64_t *freedBytes){
+  if(freedBytes)*freedBytes=0;
+  if(!cacheRoot||atomic_load(&preloadRunning)||atomic_load(&assetEngineBooted))return false;
+  uint64_t cached=0;PGAssetPreloadMeasure(NULL,NULL,&cached,NULL);
+  NSFileManager *files=NSFileManager.defaultManager;NSError *error=nil;
+  // One explicit directory: this manifest version's cache (packed and legacy).
+  if([files fileExistsAtPath:cacheRoot]&&![files removeItemAtPath:cacheRoot error:&error]){pg_log([@"Asset cache removal failed: " stringByAppendingString:error.localizedDescription].UTF8String);return false;}
+  [files createDirectoryAtPath:packedRoot withIntermediateDirectories:YES attributes:nil error:nil];
+  [[NSURL fileURLWithPath:cacheRoot] setResourceValue:@YES forKey:NSURLIsExcludedFromBackupKey error:nil];
+  atomic_store(&preloadCached,0);
+  pthread_mutex_lock(&preloadUnavailableLock);preloadUnavailable=nil;pthread_mutex_unlock(&preloadUnavailableLock);
+  if(freedBytes)*freedBytes=cached;
+  char line[128];snprintf(line,sizeof line,"Asset cache removed: %.1f MB of game files freed.",cached/1048576.0);pg_log(line);
+  return true;
 }

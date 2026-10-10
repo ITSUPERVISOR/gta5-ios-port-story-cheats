@@ -11,7 +11,8 @@ import urllib.request
 root = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser()
 parser.add_argument('--mirror', type=Path, required=True, help='folder containing data/ and b/8b0b5899ed/game.wasm')
-parser.add_argument('--prebuilt-dawn', action='store_true', help='use the downloaded Dawn instead of building it')
+parser.add_argument('--prebuilt-dawn', action='store_true', help=argparse.SUPPRESS)  # accepted for old scripts; Dawn is no longer used
+parser.add_argument('--sdk', action='append', choices=['iphoneos', 'iphonesimulator'], help='Metal library to build (default: iphoneos)')
 options = parser.parse_args()
 def apple_silicon():
     try: return subprocess.run(['sysctl', '-n', 'hw.optional.arm64'], capture_output=True, text=True).stdout.strip() == '1'
@@ -70,19 +71,23 @@ run('python3', 'Scripts/prepare_memory_pressure.py')
 shutil.copyfile(options.mirror / 'data/manifest.json', root / 'Resources/manifest.json')
 run('python3', 'Scripts/prepare_virtual_pad.py')
 run('python3', 'Scripts/prepare_unchecked_memory.py')
-if options.prebuilt_dawn:
-    # The BC texture decoder header (MIT) normally comes with the Dawn build step.
-    bcdec = root / 'Tools/bcdec'
-    if not bcdec.exists():
-        commit = '80859ed3b7afb1c527a2a99d70c61457bea72d0c'
-        archive = root / 'Tools/bcdec.tar.gz'
-        download(f'https://codeload.github.com/iOrange/bcdec/tar.gz/{commit}', archive)
-        from safe_extract import extract
-        with tarfile.open(archive) as package:
-            extract(package, root / 'Tools')
-        (root / 'Tools' / f'bcdec-{commit}').rename(bcdec)
-    run('python3', 'Scripts/generate_gpu_bridge.py')
-else:
-    run('python3', 'Scripts/prepare_renderer.py')
+# The BC texture decoder header (MIT): phones without BC texture support get decoded textures.
+bcdec = root / 'Tools/bcdec'
+if not bcdec.exists():
+    commit = '80859ed3b7afb1c527a2a99d70c61457bea72d0c'
+    archive = root / 'Tools/bcdec.tar.gz'
+    download(f'https://codeload.github.com/iOrange/bcdec/tar.gz/{commit}', archive)
+    from safe_extract import extract
+    with tarfile.open(archive) as package:
+        extract(package, root / 'Tools')
+    (root / 'Tools' / f'bcdec-{commit}').rename(bcdec)
+# The game's shaders, precompiled into the app's Metal library.
+run('python3', 'Scripts/fetch_shader_tool.py')
+shaders = root / 'Build/Inputs/shaders'
+run('python3', 'Scripts/unpack_shaders.py', '--shaders', str((options.mirror / 'b/8b0b5899ed/shaders').resolve()), '--out', str(shaders))
+sdk_args = []
+for sdk in options.sdk or ['iphoneos']:
+    sdk_args += ['--sdk', sdk]
+run('python3', 'Scripts/build_metal_shaders.py', str(shaders), *sdk_args)
 run('xcodegen', 'generate', '--spec', 'project.yml')
 print('Prepared the native boot project. Open PlayGTA5Native.xcodeproj in Xcode.')

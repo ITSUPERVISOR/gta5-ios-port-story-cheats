@@ -42,15 +42,18 @@ jobs:
       - name: Install build tools
         run: brew install xcodegen
 
-      - name: Use this repository's prebuilt Dawn release, if it has one
+      - name: Use this repository's prebuilt shader translator, if it has one
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh release download dawn-1 --repo "${{ github.repository }}" --pattern dawn-ios-prebuilt.tar.gz --dir "$RUNNER_TEMP" 2>/dev/null; then
-            echo "DAWN_PREBUILT_URL=file://$RUNNER_TEMP/dawn-ios-prebuilt.tar.gz" >> "$GITHUB_ENV"
+          if gh release download shadertool-1 --repo "${{ github.repository }}" --pattern pgmsl-macos-arm64.tar.gz --dir "$RUNNER_TEMP" 2>/dev/null; then
+            echo "PGMSL_PREBUILT_URL=file://$RUNNER_TEMP/pgmsl-macos-arm64.tar.gz" >> "$GITHUB_ENV"
           fi
 
-      - name: Build the IPA (about 15 minutes)
+      - name: Make sure the Metal shader compiler is installed
+        run: xcrun -sdk iphoneos metal --version > /dev/null 2>&1 || xcodebuild -downloadComponent MetalToolchain
+
+      - name: Build the IPA (about 25 minutes)
         env:
           SERVER: ${{ secrets.GAME_SERVER_URL }}
           JOBS: "2"
