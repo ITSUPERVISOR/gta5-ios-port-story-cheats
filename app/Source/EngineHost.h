@@ -36,6 +36,9 @@ void PGStartEngine(const char *manifestPath, const char *filesRoot, PGLogCallbac
 void PGUpdateController(PGControllerState state, double elapsedSeconds);
 // Player context: 0 on foot, otherwise the vehicle type + 1 (see NativeTouchContext.h).
 uint32_t PGCurrentTouchContext(void);
+// Game state for the touch layout: 1 control off, 2 phone out, 4 cutscene, 8 warning screen, 16 no player.
+uint32_t PGGameStatus(void);
+bool PGDebugReadMemory(uint64_t address, void *out, uint64_t length);
 // Virtual controller fed into the engine's own pad 0 (see
 // Scripts/prepare_virtual_pad.py). Buttons use the engine's pad bits:
 // L2 1, R2 2, L1 4, R1 8, Y 16, B 32, A 64, X 128, Select 256, L3 512,
@@ -56,3 +59,7 @@ void PGSetTargetingMode(int32_t mode);
 // The engine's pause menu / frontend is open.
 bool PGPauseMenuActive(void);
 void PGFillAudio(float *left, float *right, uint32_t count);
+// Health counters for the periodic log line.
+uint64_t PGMemoryBudgetQueries(void);
+uint64_t PGMemoryBudgetClamps(void);
+void PGAssetHealth(uint64_t out[6]);

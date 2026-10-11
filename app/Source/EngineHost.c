@@ -255,6 +255,34 @@ void w2c_env_wasm_audio_publish_js(struct w2c_env *host, u64 ring, u32 capacity)
   pg_log("Native stereo audio ring attached.");
 }
 
+// Read-only game-state snapshot for the touch layout (no script native is called from UIKit).
+// Bits: 1 player control off (IS_PLAYER_CONTROL_ON == false, single player: the player info's
+// control-disabled flags at *(ped+4328)+936), 2 phone on screen (a CPhoneMgr flag at 19505653 that
+// CPhoneMgr::Render/Delete and the phone-model render phase use; set while the phone is up),
+// 4 cutscene playing (IS_CUTSCENE_PLAYING, *(19339168)+3215), 8 warning screen
+// (IS_WARNING_MESSAGE_ACTIVE: 19577926 or 19577929 bit 0), 16 no local player yet.
+uint32_t PGGameStatus(void){
+ if(!atomic_load(&inputBlock))return 16;
+ const uint8_t *m=(const uint8_t *)(void *)env.memory.data;uint64_t size=env.memory.size;
+ uint32_t bits=0;uint64_t info,ped,playerInfo,cutscene;uint32_t controls;
+ if(pg_context_u64(m,size,20159720,&info)&&info&&pg_context_u64(m,size,info+8,&ped)&&ped&&
+    pg_context_u64(m,size,ped+4328,&playerInfo)&&playerInfo&&pg_context_u32(m,size,playerInfo+936,&controls)){
+  if(controls)bits|=1;
+ }else bits|=16;
+ #define PG_BYTE(address) atomic_load_explicit((const _Atomic uint8_t *)(m+(address)),memory_order_relaxed)
+ if(size>19577930){
+  if(PG_BYTE(19505653))bits|=2;
+  if(PG_BYTE(19577926)||(PG_BYTE(19577929)&1))bits|=8;
+ }
+ if(pg_context_u64(m,size,19339168,&cutscene)&&cutscene&&cutscene<size-3216&&PG_BYTE(cutscene+3215))bits|=4;
+ #undef PG_BYTE
+ return bits;
+}
+// Debug: copies [address, address+length) of engine memory (for finding state flags).
+bool PGDebugReadMemory(uint64_t address,void *out,uint64_t length){
+ if(!atomic_load(&inputBlock)||address>env.memory.size||length>env.memory.size-address)return false;
+ memcpy(out,(const uint8_t *)(void *)env.memory.data+address,length);return true;
+}
 uint32_t PGCurrentTouchContext(void){
  if(!atomic_load(&inputBlock))return 0;
  return pg_touch_context((const uint8_t *)(void *)env.memory.data,env.memory.size);

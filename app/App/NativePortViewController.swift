@@ -3,6 +3,7 @@ import MetalKit
 import GameController
 import AVFAudio
 import UniformTypeIdentifiers
+import os
 
 private func engineLog(_ message: UnsafePointer<CChar>?, _ context: UnsafeMutableRawPointer?) {
     guard let message, let context else { return }
@@ -30,6 +31,7 @@ final class NativePortViewController: UIViewController, MTKViewDelegate, UIDocum
     private let touchControls = TouchControlsView(frame: .zero)
     private let gyro = GyroInput()
     private let settingsButton = UIButton(type: .system)
+    private let layoutButton = UIButton(type: .system)
     private let serverButton = UIButton(type: .system)
     private var engineStarted = false
     private var bootedPreset = GameSettings.shared.graphicsPreset
@@ -37,7 +39,11 @@ final class NativePortViewController: UIViewController, MTKViewDelegate, UIDocum
     private let modePicker = UISegmentedControl(items: GameMode.allCases.map(\.title))
     private let modeDetail = UILabel()
     private var stableTimer: Timer?
+    private var healthTimer: Timer?
+    private var lastHealth: [UInt64] = [0, 0, 0, 0, 0, 0, 0]
     private var padProof: PGPadState?
+    private var lastGameStatus: UInt32 = 999
+    private var worldReadyAt: CFTimeInterval?
     private var tiltNeutral: Double?
     private var tiltSince: CFTimeInterval?
     private var tiltSmoothed: Double = 0
@@ -112,6 +118,9 @@ final class NativePortViewController: UIViewController, MTKViewDelegate, UIDocum
         settingsButton.setTitle("Settings", for: .normal)
         settingsButton.setImage(UIImage(systemName: "gearshape"), for: .normal)
         settingsButton.addAction(UIAction { [weak self] _ in self?.showSettings() }, for: .touchUpInside)
+        layoutButton.setTitle("Edit controls layout", for: .normal)
+        layoutButton.setImage(UIImage(systemName: "hand.tap"), for: .normal)
+        layoutButton.addAction(UIAction { [weak self] _ in self?.showLayoutEditor() }, for: .touchUpInside)
         serverButton.contentHorizontalAlignment = .leading
         serverButton.titleLabel?.numberOfLines = 0
         serverButton.addAction(UIAction { [weak self] _ in self?.askForGameFiles() }, for: .touchUpInside)
@@ -144,13 +153,16 @@ final class NativePortViewController: UIViewController, MTKViewDelegate, UIDocum
         preloadLabel.numberOfLines = 0
         preloadLabel.isHidden = true
         // The log (when shown) takes the spare height; everything else hugs its content.
-        for item in [title, subtitle, serverButton, modePicker, modeDetail, launchButton, settingsButton, preloadLabel, controllerLabel] as [UIView] {
+        for item in [title, subtitle, serverButton, modePicker, modeDetail, launchButton, settingsButton, layoutButton, preloadLabel, controllerLabel] as [UIView] {
             item.setContentHuggingPriority(.required, for: .vertical)
             item.setContentCompressionResistancePriority(.required, for: .vertical)
         }
         let spacer = UIView()
         spacer.setContentHuggingPriority(.defaultLow, for: .vertical)
-        let stack = UIStackView(arrangedSubviews: [title, subtitle, serverButton, modePicker, modeDetail, launchButton, settingsButton, preloadLabel, controllerLabel, output, spacer])
+        let buttonsRow = UIStackView(arrangedSubviews: [settingsButton, layoutButton])
+        buttonsRow.spacing = 24
+        buttonsRow.alignment = .leading
+        let stack = UIStackView(arrangedSubviews: [title, subtitle, serverButton, modePicker, modeDetail, launchButton, buttonsRow, preloadLabel, controllerLabel, output, spacer])
         stack.setCustomSpacing(20, after: subtitle)
         stack.setCustomSpacing(16, after: serverButton)
         diagnosticsOverlay = stack
@@ -212,6 +224,11 @@ final class NativePortViewController: UIViewController, MTKViewDelegate, UIDocum
         if GameFolder.findInAppFolder() { updateServerStatus() }
         NotificationCenter.default.addObserver(self, selector: #selector(lookForGameFiles), name: UIApplication.didBecomeActiveNotification, object: nil)
         displayLink = CADisplayLink(target: self, selector: #selector(pollController))
+        // ProMotion screens only run above 60 Hz when the app asks: "Unlocked" asks for up to 120.
+        if GameSettings.shared.frameRateCap == 0 {
+            let top = Float(UIScreen.main.maximumFramesPerSecond)
+            displayLink?.preferredFrameRateRange = CAFrameRateRange(minimum: min(60, top), maximum: top, preferred: top)
+        }
         displayLink?.add(to: .main, forMode: .common)
         NotificationCenter.default.addObserver(self, selector: #selector(controllerChanged), name: .GCControllerDidDisconnect, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(controllerChanged), name: .GCControllerDidConnect, object: nil)
@@ -235,6 +252,9 @@ final class NativePortViewController: UIViewController, MTKViewDelegate, UIDocum
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
                 if let message = AssetPreloader.shared.start() { self.appendLog("Preload refused: " + message) }
             }
+        }
+        if ProcessInfo.processInfo.arguments.contains("--open-layout-editor") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.showLayoutEditor() }
         }
         if ProcessInfo.processInfo.arguments.contains("--open-settings") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.showSettings() }
@@ -263,6 +283,10 @@ final class NativePortViewController: UIViewController, MTKViewDelegate, UIDocum
         if line == "WORLD_READY", ProcessInfo.processInfo.arguments.contains("--capture-world") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 35) { PGCaptureNativeFrame("optimized-world") }
         }
+        if line == "WORLD_READY", let i = ProcessInfo.processInfo.arguments.firstIndex(of: "--pad-script"), i + 1 < ProcessInfo.processInfo.arguments.count, !movementProofStarted {
+            movementProofStarted = true
+            runPadScript(ProcessInfo.processInfo.arguments[i + 1])
+        }
         if line == "WORLD_READY", ProcessInfo.processInfo.arguments.contains("--verify-pad"), !movementProofStarted {
             movementProofStarted = true
             DispatchQueue.main.asyncAfter(deadline: .now() + 30) { self.verifyVirtualPad() }
@@ -271,7 +295,11 @@ final class NativePortViewController: UIViewController, MTKViewDelegate, UIDocum
             movementProofStarted = true
             DispatchQueue.main.asyncAfter(deadline: .now() + 30) { self.verifyMovement() }
         }
-        if line == "WORLD_READY" { PGSetTargetingMode(Int32(GameSettings.shared.targetingMode)) }
+        if line == "WORLD_READY" { PGSetTargetingMode(Int32(GameSettings.shared.targetingMode)); if worldReadyAt == nil { worldReadyAt = CACurrentMediaTime() } }
+        if line == "WORLD_READY", healthTimer == nil {
+            // Every 10 s: memory, how often the memory guard held streaming back, and game-file reads.
+            healthTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in self?.logHealth() }
+        }
         if line == "WORLD_READY", stableTimer == nil {
             // Three minutes in the world counts as a launch that fits in memory.
             stableTimer = Timer.scheduledTimer(withTimeInterval: 180, repeats: false) { _ in GameSettings.shared.markBootStable() }
@@ -328,6 +356,7 @@ final class NativePortViewController: UIViewController, MTKViewDelegate, UIDocum
         PGAttachMetalLayer(Unmanaged.passUnretained(metalView.layer).toOpaque())
         launchButton.isEnabled = false
         settingsButton.isHidden = true
+        layoutButton.isHidden = true
         modePicker.isEnabled = false
         engineStarted = true
         let mode = GameSettings.shared.gameMode
@@ -385,6 +414,57 @@ final class NativePortViewController: UIViewController, MTKViewDelegate, UIDocum
                 self.appendLog("Movement proof: native controller sticks released.")
             }
         }
+    }
+
+    /// Debug: scripted controller input, "step;step;..." with steps "wait:<s>", "hold:<buttons>:<s>"
+    /// (buttons: a b x y l1 r1 lt rt down up left right start rx+ rx- ry+ ry-, joined with +), "frame:<name>".
+    /// Debug: --watch-memory <address> <length> logs which bytes change between pad-script frames.
+    private var watchSnapshot: [UInt8]?
+    private func watchMemory(_ label: String) {
+        let args = ProcessInfo.processInfo.arguments
+        guard let i = args.firstIndex(of: "--watch-memory"), i + 2 < args.count,
+              let start = UInt64(args[i + 1]), let length = Int(args[i + 2]) else { return }
+        var now = [UInt8](repeating: 0, count: length)
+        guard now.withUnsafeMutableBytes({ PGDebugReadMemory(start, $0.baseAddress, UInt64(length)) }) else { return }
+        if let before = watchSnapshot {
+            var changes: [String] = []
+            for k in 0..<length where before[k] != now[k] { changes.append("\(start + UInt64(k)):\(before[k])>\(now[k])") }
+            appendLog("Memory watch \(label): \(changes.count) changed " + changes.prefix(400).joined(separator: " "))
+        }
+        watchSnapshot = now
+    }
+    private func runPadScript(_ script: String) {
+        var at = 0.0
+        for step in script.split(separator: ";") {
+            let parts = step.split(separator: ":").map(String.init)
+            switch parts.first {
+            case "wait": at += Double(parts.count > 1 ? parts[1] : "1") ?? 1
+            case "frame":
+                let name = parts.count > 1 ? parts[1] : "script"
+                DispatchQueue.main.asyncAfter(deadline: .now() + at) { PGCaptureNativeFrame(name); self.appendLog("Pad script: frame \(name)"); self.watchMemory(name) }
+            case "hold":
+                var state = PGPadState(); var held = PadButtons()
+                for name in (parts.count > 1 ? parts[1] : "").split(separator: "+") {
+                    switch name {
+                    case "a": held.insert(.a); case "b": held.insert(.b); case "x": held.insert(.x); case "y": held.insert(.y)
+                    case "l1": held.insert(.l1); case "r1": held.insert(.r1); case "down": held.insert(.down); case "up": held.insert(.up)
+                    case "left": held.insert(.left); case "right": held.insert(.right); case "start": held.insert(.start)
+                    case "lt": state.leftTrigger = 1; case "rt": state.rightTrigger = 1
+                    case "rx+": state.rightX = 1; case "rx-": state.rightX = -1; case "ry+": state.rightY = 1; case "ry-": state.rightY = -1
+                    default: break
+                    }
+                }
+                state.padButtons = held
+                let duration = Double(parts.count > 2 ? parts[2] : "0.3") ?? 0.3
+                let label = String(step)
+                DispatchQueue.main.asyncAfter(deadline: .now() + at) { self.padProof = state; self.appendLog("Pad script: \(label)") }
+                at += duration
+                DispatchQueue.main.asyncAfter(deadline: .now() + at) { self.padProof = PGPadState() }
+            default: break
+            }
+        }
+        // Hand input back to the touch controls (and controller) when the script ends.
+        DispatchQueue.main.asyncAfter(deadline: .now() + at + 0.5) { self.padProof = nil; self.appendLog("Pad script: done") }
     }
 
     /// Simulator proof that the engine accepts the virtual controller and
@@ -573,8 +653,37 @@ final class NativePortViewController: UIViewController, MTKViewDelegate, UIDocum
         present(alert, animated: true)
     }
 
+    private func logHealth() {
+        var vm = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size)
+        let ok = withUnsafeMutablePointer(to: &vm) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count) }
+        } == KERN_SUCCESS
+        let used = ok ? Int(vm.phys_footprint / 1_048_576) : -1
+        let available = Int(os_proc_available_memory() / 1_048_576)
+        let free = available > 0 ? available : max(0, GameSettings.shared.tier.memoryLimitMB - used)
+        var reads = [UInt64](repeating: 0, count: 6)
+        reads.withUnsafeMutableBufferPointer { PGAssetHealth($0.baseAddress) }
+        let now = [PGMemoryBudgetClamps()] + reads
+        let d = zip(now, lastHealth).map { $0 &- $1 }
+        lastHealth = now
+        let avgMS = d[1] > 0 ? Double(d[6]) / Double(d[1]) / 1000 : 0
+        appendLog(String(format: "Health: memory %d MB used, %d MB free · guard held back streaming %llu× · reads %llu (%.1f MB, avg %.1f ms, slow %llu, errors %llu) · %.0f FPS",
+                         used, free, d[0], d[1], Double(d[2]) / 1_048_576, avgMS, d[5], d[3], PGRenderedFramesPerSecond()))
+    }
+
     @objc private func leftApp() { if stableTimer?.isValid != false { GameSettings.shared.markBootInterrupted() } }
 
+    /// The touch-controls layout editor (pre-game, or from Settings).
+    private func showLayoutEditor() {
+        let editor = ControlsLayoutEditorController()
+        editor.modalPresentationStyle = .fullScreen
+        editor.onDone = { [weak self] in
+            self?.touchControls.updateVisibility()
+            self?.appendLog("Controls layout saved (\(ControlsLayout.entries.count) customized controls).")
+        }
+        (presentedViewController ?? self).present(editor, animated: true)
+    }
     private func showSettings() {
         guard presentedViewController == nil else { return }
         touchControls.reset()
@@ -582,6 +691,7 @@ final class NativePortViewController: UIViewController, MTKViewDelegate, UIDocum
         controller.gameModeChanged = { [weak self] in self?.refreshModeChoice() }
         controller.resolutionChanged = { [weak self] in self?.applyLiveResolution() }
         controller.controlsChanged = { [weak self] in self?.touchControls.updateVisibility() }
+        controller.editLayout = { [weak self] in self?.showLayoutEditor() }
         controller.targetingChanged = { PGSetTargetingMode(Int32(GameSettings.shared.targetingMode)) }
         present(UINavigationController(rootViewController: controller), animated: true)
     }
@@ -617,25 +727,44 @@ final class NativePortViewController: UIViewController, MTKViewDelegate, UIDocum
         }
         let elapsed = lastControllerPoll.map { now - $0 } ?? (1.0 / 60.0)
         lastControllerPoll = now
+        let gameStatus = PGGameStatus()
+        if gameStatus != lastGameStatus {
+            lastGameStatus = gameStatus
+            appendLog("Game state: control \(gameStatus & 1 != 0 ? "off" : "on")\(gameStatus & 2 != 0 ? ", phone out" : "")\(gameStatus & 4 != 0 ? ", cutscene" : "")\(gameStatus & 8 != 0 ? ", warning screen" : "")\(gameStatus & 16 != 0 ? ", no player" : "")")
+            if ProcessInfo.processInfo.arguments.contains("--capture-state") { PGCaptureNativeFrame("state-\(gameStatus)-\(Int(now))") }
+        }
         if let padProof { PGUpdateVirtualPad(padProof); return }
         // Everything reaches the engine as its own controller, so controller
         // features (assisted aim, analog steering and throttle) apply.
         var state = PGPadState()
+        var hasController = false
         if let controller = GCController.controllers().first(where: { $0.extendedGamepad != nil }), let pad = controller.extendedGamepad {
             state = PGPadState(gamepad: pad)
+            hasController = true
             if diagnosticsOverlay?.isHidden != true { controllerLabel.text = "Controller: \(controller.vendorName ?? "Gamepad")" }
         } else if diagnosticsOverlay?.isHidden != true {
             controllerLabel.text = "Touch controls ready"
         }
-        touchControls.isHidden = !touchControlsAvailable
-        var vehicle = touchControlsAvailable ? PGCurrentTouchContext() : 0
+        // With a controller connected the touch controls step aside (Settings › Touch controls).
+        let touchActive = touchControlsAvailable && !(hasController && GameSettings.shared.hideTouchWithController)
+        touchControls.isHidden = !touchActive
+        var vehicle = touchActive ? PGCurrentTouchContext() : 0
         var pauseMenu = PGPauseMenuActive()
         // Debug: --preview-context <vehicle type + 1 | menu> to review a layout.
         let arguments = ProcessInfo.processInfo.arguments
         if let i = arguments.firstIndex(of: "--preview-context"), i + 1 < arguments.count {
             if arguments[i + 1] == "menu" { pauseMenu = true } else { vehicle = UInt32(arguments[i + 1]) ?? 0 }
         }
-        if touchControlsAvailable {
+        // Debug: --context-after <seconds after WORLD_READY> <vehicle type + 1> simulates entering a vehicle.
+        if let i = arguments.firstIndex(of: "--context-after"), i + 2 < arguments.count, let ready = worldReadyAt,
+           let after = Double(arguments[i + 1]), now - ready > after { vehicle = UInt32(arguments[i + 2]) ?? vehicle }
+        if touchActive {
+            // Debug: --preview-prompt shows the Accept/Back prompt layout, --preview-phone the phone dock.
+            var status = gameStatus
+            if arguments.contains("--preview-prompt") { status |= 1 }
+            if arguments.contains("--preview-phone") { status |= 2 }
+            touchControls.characterSwitchEnabled = bootedMode == .story || arguments.contains("--preview-switch")
+            touchControls.updateGameState(status)
             touchControls.updateContext(vehicle: vehicle, pauseMenu: pauseMenu)
             let touch = touchControls.padState(elapsed: elapsed)
             if ProcessInfo.processInfo.arguments.contains("--trace-touch-controls") {
@@ -664,8 +793,8 @@ final class NativePortViewController: UIViewController, MTKViewDelegate, UIDocum
         let settings = GameSettings.shared
         let onFoot = vehicle == 0
         let driving = touchControls.context.driving
-        let tiltWanted = touchControlsAvailable && driving && settings.tiltSteer != .off
-        let gyroWanted = touchControlsAvailable && ((settings.gyroAim != .off && !touchControls.flyingWithRightStick && touchControls.context != .menu) || tiltWanted)
+        let tiltWanted = touchActive && driving && settings.tiltSteer != .off
+        let gyroWanted = touchActive && ((settings.gyroAim != .off && !touchControls.flyingWithRightStick && touchControls.context != .menu) || tiltWanted)
         let orientation = view.window?.windowScene?.interfaceOrientation ?? .landscapeRight
         gyro.setRunning(gyroWanted, orientation: orientation)
         if tiltWanted, let angle = gyro.steeringAngle() {

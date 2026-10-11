@@ -63,7 +63,7 @@ final class GameSettings {
         set { defaults.set(min(max(newValue, 0.7), 1.5), forKey: "controlScale") }
     }
     var lookSensitivity: Double {
-        get { defaults.object(forKey: "lookSensitivity") as? Double ?? 1.0 }
+        get { defaults.object(forKey: "lookSensitivity") as? Double ?? 2.0 }
         set { defaults.set(min(max(newValue, 0.3), 3), forKey: "lookSensitivity") }
     }
     /// Camera speed while aiming (the game slows the camera when aiming).
@@ -117,10 +117,21 @@ final class GameSettings {
         get { defaults.object(forKey: "matchScreenShape") as? Bool ?? true }
         set { defaults.set(newValue, forKey: "matchScreenShape") }
     }
-    var sixtyFPS: Bool {
-        get { defaults.bool(forKey: "sixtyFPS") }
-        set { defaults.set(newValue, forKey: "sixtyFPS") }
+    /// Hide the touch controls while a game controller is connected (on by default).
+    var hideTouchWithController: Bool {
+        get { defaults.object(forKey: "hideTouchWithController") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: "hideTouchWithController") }
     }
+    var sixtyFPS: Bool { frameRateCap != 30 }
+    /// Frame rate cap: 30, 60, or 0 for unlocked (up to the screen's refresh rate, 120 on ProMotion).
+    var frameRateCap: Int {
+        get {
+            if let cap = defaults.object(forKey: "frameRateCap") as? Int, [0, 30, 60].contains(cap) { return cap }
+            return defaults.bool(forKey: "sixtyFPS") ? 60 : 30 // older versions stored a 60 FPS switch
+        }
+        set { defaults.set(newValue, forKey: "frameRateCap") }
+    }
+    static func frameRateTitle(_ cap: Int) -> String { cap == 0 ? "Unlocked" : "\(cap) FPS" }
 
     // Crash fallback: a launch that never reached a stable world is treated
     // as a memory kill, and the last preset that worked is restored.

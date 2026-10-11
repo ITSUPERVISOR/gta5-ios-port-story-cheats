@@ -30,7 +30,8 @@ enum ControlStyle {
         "radio": "radio", "look_back": "arrow.uturn.backward", "up": "chevron.up", "down": "chevron.down",
         "left": "chevron.left", "right": "chevron.right", "accept": "checkmark", "back": "arrow.uturn.left",
         "tab_left": "chevron.left.2", "tab_right": "chevron.right.2", "dive": "arrow.down.to.line",
-        "surface": "arrow.up.to.line", "crouch": "figure.walk", "pedal": "bicycle"]
+        "surface": "arrow.up.to.line", "crouch": "figure.walk", "pedal": "bicycle",
+        "switch_character": "person.2.fill"]
 }
 
 /// One on-screen control: a glyph in a circle (or a rounded pedal), no caption.
@@ -203,6 +204,10 @@ final class FloatingStick: UIView {
 /// there is no manual mode switch.
 final class TouchControlsView: UIView {
     var inputChanged: (() -> Void)?
+    /// In the layout editor: controls are shown but not played, and hidden controls stay visible (dimmed).
+    var editing = false
+    /// The control selected in the layout editor (drawn with a highlight).
+    weak var highlighted: ControlButton? { didSet { updateHighlight() } }
     var openSettings: (() -> Void)?
     private(set) var context = ControlContext.onFoot
 
@@ -210,6 +215,8 @@ final class TouchControlsView: UIView {
         case button(ControlButton)
         case moveStick, look, steer, flightRight
         case weaponWheel(start: CGPoint, current: CGPoint)
+        /// Character switch: D-pad down held, the same finger points at Michael, Franklin or Trevor.
+        case characterWheel(start: CGPoint, current: CGPoint)
         case fireLook(ControlButton)
     }
     private var roles: [ObjectIdentifier: Role] = [:]
@@ -227,6 +234,14 @@ final class TouchControlsView: UIView {
     private var exitHoldStart: CFTimeInterval?
     private var phoneDock = false
     private var lastDockInput: CFTimeInterval = 0
+    /// Game state (PGGameStatus): the phone is out on screen, and a full-screen prompt waits for
+    /// Accept/Back (player control off outside cutscenes, e.g. Mission failed, or a warning screen).
+    private var gamePhoneOut = false
+    private var phoneRequestedAt: CFTimeInterval?
+    private var promptSince: CFTimeInterval?
+    private var promptActive = false
+    /// Story mode only: the character switch button.
+    var characterSwitchEnabled = false { didSet { if characterSwitchEnabled != oldValue { updateVisibility() } } }
     private var pedalClock: Double = 0
     private let haptics = UIImpactFeedbackGenerator(style: .light)
 
@@ -240,6 +255,7 @@ final class TouchControlsView: UIView {
     private let reload = ControlButton("reload", icon: "reload", label: "Reload")
     private let cover = ControlButton("cover", icon: "cover", label: "Take cover")
     private let crouch = ControlButton("crouch", icon: "crouch", label: "Stealth")
+    private let switcher = ControlButton("switchCharacter", icon: "switch_character", label: "Switch character")
     // Vehicles
     private let gas = ControlButton("gas", icon: "gas", label: "Gas")
     private let brake = ControlButton("brake", icon: "brake", label: "Brake and reverse")
@@ -271,7 +287,7 @@ final class TouchControlsView: UIView {
     private let tabRight = ControlButton("tabRight", icon: "tab_right", label: "Next tab")
 
     private var allButtons: [ControlButton] {
-        [fire, aim, leftFire, jump, enter, weapons, reload, cover, crouch, gas, brake, handbrake, driveBy, horn, lookBack,
+        [fire, aim, leftFire, jump, enter, weapons, reload, cover, crouch, switcher, gas, brake, handbrake, driveBy, horn, lookBack,
          vehicleWeapon, dive, surface, airFire, gear, camera, phone, pause, settings, lights, radio,
          up, down, left, right, accept, back, tabLeft, tabRight]
     }
@@ -301,15 +317,22 @@ final class TouchControlsView: UIView {
         reset(publish: false, keepStickFinger: carryStick)
         throttle = 0
         context = next
-        phoneDock = false
+        if next == .menu || !gamePhoneOut { phoneDock = false }
         updateVisibility()
         setNeedsLayout()
     }
 
     private func computeVisible() -> [ControlButton] {
+        var list = baseVisible()
+        if characterSwitchEnabled, !phoneDock, !promptActive, [.onFoot, .car, .bike, .boat].contains(context) { list.append(switcher) }
+        return list
+    }
+    private func baseVisible() -> [ControlButton] {
         let utility: [ControlButton] = context.driving || context.flying ? [radio, lights, camera, phone, pause, settings] : [camera, phone, pause, settings]
         if context == .menu { return [pause, settings, up, down, left, right, accept, back, tabLeft, tabRight] }
         if phoneDock { return [camera, phone, pause, settings, up, down, left, right, accept, back] }
+        // A prompt (Mission failed, warning screens) waits for Accept/Back; play controls do nothing then.
+        if promptActive && !editing { return [camera, pause, settings, accept, back] }
         switch context {
         case .onFoot:
             return aimActive ? utility + [fire, aim, enter, weapons, reload, cover, leftFire]
@@ -331,13 +354,44 @@ final class TouchControlsView: UIView {
         }
     }
 
+    /// Game state from the engine (PGGameStatus bits: 1 control off, 2 phone out, 4 cutscene,
+    /// 8 warning screen, 16 no player).
+    func updateGameState(_ status: UInt32, now: CFTimeInterval = CACurrentMediaTime()) {
+        let phoneOut = status & 2 != 0
+        if phoneOut != gamePhoneOut {
+            gamePhoneOut = phoneOut
+            if phoneOut { phoneDock = true; phoneRequestedAt = nil; lastDockInput = now }
+            else if phoneDock { phoneDock = false }
+            if context != .menu { reset(publish: false) }
+            updateVisibility()
+        }
+        // Accept/Back prompt: player control off outside cutscenes (Mission failed and similar
+        // screens), or a warning screen. Held for a moment so brief control locks don't flicker.
+        let wanted = status & 16 == 0 && ((status & 1 != 0 && status & 4 == 0) || status & 8 != 0)
+        if wanted { if promptSince == nil { promptSince = now } } else { promptSince = nil }
+        let show = wanted && now - (promptSince ?? now) > 0.6
+        if show != promptActive {
+            promptActive = show
+            reset(publish: false)
+            updateVisibility()
+        }
+    }
+    var showingPrompt: Bool { promptActive }
+
+    /// The saved-layout group for the current controls: on foot, or any vehicle.
+    var layoutGroup: String { context == .onFoot ? "foot" : "vehicle" }
+    private func hiddenByPlayer(_ button: ControlButton) -> Bool {
+        context != .menu && !phoneDock && (ControlsLayout.entry(group: layoutGroup, name: button.name)?.hidden ?? false)
+    }
+
     func updateVisibility() {
-        visible = computeVisible()
+        visible = computeVisible().filter { editing || !hiddenByPlayer($0) }
         let shown = Set(visible.map(ObjectIdentifier.init))
         let opacity = CGFloat(GameSettings.shared.controlOpacity)
         for button in allButtons {
             let isShown = shown.contains(ObjectIdentifier(button))
-            let target: CGFloat = isShown ? (button === fire || button === gas ? min(1, opacity + 0.1) : opacity) : 0
+            var target: CGFloat = isShown ? (button === fire || button === gas ? min(1, opacity + 0.1) : opacity) : 0
+            if editing, isShown, hiddenByPlayer(button) { target = 0.3 }
             if abs(button.alpha - target) > 0.01 {
                 UIView.animate(withDuration: UIAccessibility.isReduceMotionEnabled ? 0 : 0.15) { button.alpha = target }
             }
@@ -393,6 +447,7 @@ final class TouchControlsView: UIView {
         place(cover, 0.60, 0.82, 52)
         place(crouch, 0.58, 0.60, 44)
         place(leftFire, 0.10, 0.36, 58)
+        place(switcher, 0.955, 0.295, 46)
 
         // Ground vehicles: analog steering on the left, pedals on the right.
         pedal(gas, 0.905, 0.72, 74, 108)
@@ -419,6 +474,48 @@ final class TouchControlsView: UIView {
         place(back, 0.765, 0.84, 56)
         place(tabLeft, 0.05, 0.12, 46)
         place(tabRight, 0.95, 0.12, 46)
+
+        // The player's own layout (Edit controls layout): moved and resized controls. Hit areas
+        // follow, since touches test each control's frame.
+        if context != .menu && !phoneDock {
+            for button in visible {
+                guard let entry = ControlsLayout.entry(group: layoutGroup, name: button.name) else { continue }
+                let size = button.bounds.size
+                button.bounds.size = CGSize(width: max(36, size.width * entry.scale), height: max(36, size.height * entry.scale))
+                button.center = point(entry.x, entry.y)
+            }
+        }
+        updateHighlight()
+    }
+
+    // MARK: Layout editor support
+
+    private let highlightLayer: CAShapeLayer = {
+        let layer = CAShapeLayer()
+        layer.fillColor = nil
+        layer.strokeColor = UIColor.systemYellow.cgColor
+        layer.lineWidth = 3
+        layer.lineDashPattern = [6, 4]
+        return layer
+    }()
+    private func updateHighlight() {
+        if highlightLayer.superlayer == nil { layer.addSublayer(highlightLayer) }
+        guard let button = highlighted, visible.contains(where: { $0 === button }) else { highlightLayer.path = nil; return }
+        let frame = button.frame.insetBy(dx: -6, dy: -6)
+        highlightLayer.path = UIBezierPath(roundedRect: frame, cornerRadius: button.isPedal ? 22 : frame.width / 2).cgPath
+    }
+    /// The visible control under a point (layout editor).
+    func editableButton(at point: CGPoint) -> ControlButton? { button(at: point) }
+    func button(named name: String) -> ControlButton? { allButtons.first { $0.name == name } }
+    /// A point as a fraction of the safe area (what the saved layout stores).
+    func normalized(_ point: CGPoint) -> CGPoint {
+        let safe = bounds.inset(by: safeAreaInsets)
+        guard safe.width > 0, safe.height > 0 else { return CGPoint(x: 0.5, y: 0.5) }
+        return CGPoint(x: (point.x - safe.minX) / safe.width, y: (point.y - safe.minY) / safe.height)
+    }
+    func clampedToSafeArea(_ point: CGPoint) -> CGPoint {
+        let safe = bounds.inset(by: safeAreaInsets).insetBy(dx: 24, dy: 24)
+        return CGPoint(x: min(max(point.x, safe.minX), safe.maxX), y: min(max(point.y, safe.minY), safe.maxY))
     }
 
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
@@ -439,6 +536,7 @@ final class TouchControlsView: UIView {
     private func isLook(_ role: Role) -> Bool { if case .look = role { return true }; return false }
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        if editing { return }
         let safe = bounds.inset(by: safeAreaInsets)
         for touch in touches {
             let point = touch.location(in: self)
@@ -472,6 +570,8 @@ final class TouchControlsView: UIView {
         switch button {
         case weapons:
             roles[id] = .weaponWheel(start: point, current: point)
+        case switcher:
+            roles[id] = .characterWheel(start: point, current: point)
         case fire, driveBy:
             roles[id] = .fireLook(button)
             fireStartedAt = now
@@ -489,7 +589,13 @@ final class TouchControlsView: UIView {
         case enter where context.flying:
             exitHoldStart = now
         case phone:
-            phoneDock.toggle()
+            if gamePhoneOut {
+                // The phone is out: this button now puts it away (Back), the dock follows the game.
+                phoneRequestedAt = nil
+            } else {
+                phoneDock.toggle()
+                phoneRequestedAt = phoneDock ? now : nil
+            }
             lastDockInput = now
             updateVisibility()
         case settings:
@@ -524,6 +630,8 @@ final class TouchControlsView: UIView {
                 if let origin = dragOrigins[id] { dragOrigins[id] = (origin.start, point) }
             case .weaponWheel(let start, _):
                 roles[id] = .weaponWheel(start: start, current: point)
+            case .characterWheel(let start, _):
+                roles[id] = .characterWheel(start: start, current: point)
             case .button(let button):
                 // Pedals: a finger may roll from one to another without lifting.
                 if button.slideTarget, !button.contains(point: point, slop: 10),
@@ -550,6 +658,7 @@ final class TouchControlsView: UIView {
             case .flightRight: rightStick.end()
             case .look: lookStick.end()
             case .weaponWheel: weapons.setPressed(false)
+            case .characterWheel: switcher.setPressed(false)
             case .fireLook(let button):
                 button.setPressed(false)
                 if button === fire || button === driveBy { fireStartedAt = nil }
@@ -573,6 +682,7 @@ final class TouchControlsView: UIView {
             case .flightRight: rightStick.end()
             case .button(let button), .fireLook(let button): button.setPressed(false)
             case .weaponWheel: weapons.setPressed(false)
+            case .characterWheel: switcher.setPressed(false)
             case .look: lookStick.end()
             }
             roles[id] = nil
@@ -700,9 +810,18 @@ final class TouchControlsView: UIView {
             break
         }
 
+        for role in roles.values {
+            guard case .characterWheel(let start, let current) = role else { continue }
+            // Hold D-pad down (the selector opens); the same finger points at a character.
+            held.insert(.down)
+            let d = CGPoint(x: current.x - start.x, y: current.y - start.y), length = hypot(d.x, d.y)
+            state.rightX = length > 24 ? Float(d.x / length) : 0
+            state.rightY = length > 24 ? Float(-d.y / length) : 0
+        }
         if camera.pressed { held.insert(.select) }
         if pause.pressed { held.insert(.start) }
-        if phone.pressed && phoneDock { held.insert(.up) }
+        if phone.pressed && phoneDock && !gamePhoneOut { held.insert(.up) }
+        if phone.pressed && gamePhoneOut { held.insert(.b) }
         if up.pressed { held.insert(.up) }
         if down.pressed { held.insert(.down) }
         if left.pressed { held.insert(.left) }
@@ -711,7 +830,12 @@ final class TouchControlsView: UIView {
         if back.pressed { held.insert(.b) }
         if tabLeft.pressed { held.insert(.l1) }
         if tabRight.pressed { held.insert(.r1) }
-        if phoneDock && now - lastDockInput > 20 { phoneDock = false; updateVisibility() }
+        // Without a phone on screen the dock closes itself: after a moment when the phone did not
+        // come up, or after 20 s without input as before.
+        if phoneDock && !gamePhoneOut {
+            if let asked = phoneRequestedAt, now - asked > 2.5 { phoneDock = false; phoneRequestedAt = nil; updateVisibility() }
+            else if phoneRequestedAt == nil && now - lastDockInput > 20 { phoneDock = false; updateVisibility() }
+        }
 
         state.padButtons = held
         return state

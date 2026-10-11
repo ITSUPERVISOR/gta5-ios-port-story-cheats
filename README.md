@@ -64,9 +64,38 @@ Everything plays from your phone: no server, no internet needed while playing.
 ## Tips
 
 - **Graphics.** Settings has six presets, from Battery to Max, and a separate resolution choice that changes while you play. Presets above the recommended one show a warning. If a setting needs more memory than your iPhone gives the app, the game closes; on the next launch the app tells you and goes back to a setting that works. Settings that already ran fine on your phone are never lowered.
-- **Something went wrong?** Settings › **Share log** sends this run's log and the previous one (the one from a crash). Include it when you ask for help.
-- **Controls.** Touch controls (size, opacity and stick speed in Settings), assisted aim, gyro aiming and tilt steering. Bluetooth controllers work too.
+- **Something went wrong?** Settings › **Send log to the developer** sends this run's log and the previous one (the one from a crash) in one tap. **Share log** lets you save or send it yourself.
+- **Controls.** Move, resize or hide every touch button with **Edit controls layout** (start screen or Settings). Assisted aim, gyro aiming and tilt steering are in Settings. Bluetooth controllers work too; the touch controls hide while one is connected.
 - **Updating.** When a new version comes out, open the builder again and tap **Build again**. Your game folder and saves stay where they are.
+
+## Get the most performance
+
+The biggest upgrade is **more memory**: iOS normally gives the app about half of your iPhone's RAM, which caps the graphics. You can unlock more, for free:
+
+### Unlock more memory with SideStore + GetMoreRam (free)
+
+Players report this works great and makes the game far more playable.
+
+1. On [fivestarport.vercel.app](https://fivestarport.vercel.app), tick **Enable increased memory entitlements** before tapping Upload and build (already built? tick it and tap **Build again**).
+2. Install the new `GTA5Port.ipa` with **SideStore** as usual.
+3. Install **[GetMoreRam](https://github.com/hugeBlack/GetMoreRam)**, sign in with the **same Apple ID** you use in SideStore, pick **GTA V Port** and add **Increased Memory Limit**.
+4. In SideStore, **refresh** GTA V Port so it picks up the change.
+5. Open the app: **Settings** shows the memory limit at the bottom. It should now be clearly higher than before (for example above ~3,500 MB on a 6 GB iPhone).
+
+A paid Apple developer account or TrollStore gets you the same result without GetMoreRam (see *Free vs paid* below).
+
+### Then tune the game
+
+- **Graphics preset:** with more memory, try one step higher (Balanced, Quality, Ultra). If a preset is too much, the app tells you on the next launch and steps back down, so trying is safe.
+- **Resolution:** set it separately in Settings while you play. It's the main lever for sharpness vs. frame rate.
+- **Frame rate:** Settings › Frame rate: **30** is steadiest and coolest, **60** is smoother, **Unlocked** goes up to 120 on ProMotion iPhones (13 Pro and newer Pro models). Applies at the next launch.
+- **Keep it cool:** iPhones slow down when hot. Play without a case or near airflow, and avoid charging while playing if it gets warm.
+- **Close other apps** before playing and keep **Low Power Mode off**.
+- **Game files on the iPhone:** keep the game folder in *On My iPhone*, not iCloud Drive (iCloud can offload files and cause loading stutters).
+
+## What's new
+
+See [CHANGELOG.md](CHANGELOG.md) for every version.
 
 ## Community and help
 
@@ -136,7 +165,7 @@ Private repositories get free GitHub Actions minutes every month (2,000 on the f
 
 Settings shows the memory limit iOS gave the app at the bottom.
 
-**Using a paid account:** tick *I have a paid Apple developer account* (under Advanced in the builder) or use `--paid` on a Mac, then sign with your paid team. On a Mac (most reliable): open `app/PlayGTA5Native.xcodeproj`, pick your paid team under **Signing & Capabilities**, change the bundle identifier to something unique (e.g. `com.yourname.gta5port`), check that **Increased Memory Limit** and **Extended Virtual Addressing** are listed, choose your iPhone and press **Run**. If an IPA signed by SideStore or AltStore with a paid Apple ID shows the free limit, the tool dropped the entitlements; use the Mac route.
+**Using a paid account:** tick *Enable increased memory entitlements* in the builder or use `--paid` on a Mac, then sign with your paid team. On a Mac (most reliable): open `app/PlayGTA5Native.xcodeproj`, pick your paid team under **Signing & Capabilities**, change the bundle identifier to something unique (e.g. `com.yourname.gta5port`), check that **Increased Memory Limit** and **Extended Virtual Addressing** are listed, choose your iPhone and press **Run**. If an IPA signed by SideStore or AltStore with a paid Apple ID shows the free limit, the tool dropped the entitlements; use the Mac route.
 
 ## How it works
 

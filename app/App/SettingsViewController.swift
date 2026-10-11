@@ -10,6 +10,7 @@ final class SettingsViewController: UITableViewController {
     private let runningMode: GameMode?
     var resolutionChanged: (() -> Void)?
     var controlsChanged: (() -> Void)?
+    var editLayout: (() -> Void)?
     var targetingChanged: (() -> Void)?
     var gameModeChanged: (() -> Void)?
 
@@ -55,10 +56,10 @@ final class SettingsViewController: UITableViewController {
         switch Section(rawValue: section)! {
         case .mode: return GameMode.allCases.count
         case .graphics: return settings.tier.allowed.count + 3
-        case .controls: return 6
+        case .controls: return 8
         case .gyro: return (settings.gyroAim == .off ? 1 : 3) + (settings.tiltSteer == .off ? 1 : 2)
         case .files: return fileRows.count
-        case .device: return 2
+        case .device: return 3
         }
     }
 
@@ -137,11 +138,19 @@ final class SettingsViewController: UITableViewController {
                         self?.settings.matchScreenShape = $0; self?.resolutionChanged?(); self?.tableView.reloadData()
                     }
                 } else {
-                    content.text = "60 FPS limit"
-                    content.secondaryText = "Uses more power and heat; 30 FPS is steadier"
-                    cell.accessoryView = toggle(settings.sixtyFPS, label: "60 FPS limit") { [weak self] in
-                        self?.settings.sixtyFPS = $0; self?.reloadFooters()
-                    }
+                    content.text = "Frame rate"
+                    content.secondaryText = "Higher uses more power and heat; 30 FPS is steadiest. Unlocked goes up to 120 on ProMotion iPhones."
+                    let button = UIButton(type: .system)
+                    button.setTitle(GameSettings.frameRateTitle(settings.frameRateCap) + " ▾", for: .normal)
+                    button.showsMenuAsPrimaryAction = true
+                    button.accessibilityLabel = "Frame rate"
+                    button.menu = UIMenu(children: [30, 60, 0].map { cap in
+                        UIAction(title: GameSettings.frameRateTitle(cap), state: cap == settings.frameRateCap ? .on : .off) { [weak self] _ in
+                            self?.settings.frameRateCap = cap; self?.reloadFooters(); self?.tableView.reloadData()
+                        }
+                    })
+                    button.sizeToFit()
+                    cell.accessoryView = button
                 }
             }
         case .controls:
@@ -153,6 +162,10 @@ final class SettingsViewController: UITableViewController {
             case 5:
                 cell.accessoryView = slider(settings.aimSensitivity, 0.3, 4, label: "Aim look speed") { [weak self] in self?.settings.aimSensitivity = $0 }
                 content.text = "Aim stick speed"
+            case 7:
+                content.text = "Edit controls layout"
+                content.secondaryText = ControlsLayout.isCustomized ? "Customized" : "Move, resize or hide buttons"
+                content.textProperties.color = .systemBlue
             case 1:
                 cell.accessoryView = slider(settings.controlScale, 0.7, 1.5, label: "Button size") { [weak self] in self?.settings.controlScale = $0; self?.controlsChanged?() }
                 content.text = "Button size"
@@ -173,6 +186,10 @@ final class SettingsViewController: UITableViewController {
                 button.showsMenuAsPrimaryAction = true
                 button.sizeToFit()
                 cell.accessoryView = button
+            case 6:
+                content.text = "Hide when a controller is connected"
+                content.secondaryText = "Touch controls come back as soon as the controller disconnects"
+                cell.accessoryView = toggle(settings.hideTouchWithController, label: "Hide touch controls with a controller") { [weak self] in self?.settings.hideTouchWithController = $0 }
             default:
                 content.text = "Fire also aims"
                 content.secondaryText = "Fire locks on first, like the classic mobile GTA games"
@@ -241,9 +258,13 @@ final class SettingsViewController: UITableViewController {
                 content.textProperties.font = .preferredFont(forTextStyle: .footnote)
                 content.textProperties.color = .secondaryLabel
                 cell.selectionStyle = .none
+            } else if indexPath.row == 1 {
+                content.text = "Send log to the developer"
+                content.secondaryText = "One tap. Helps fix crashes and loading problems"
+                content.textProperties.color = .systemBlue
             } else {
                 content.text = "Share log"
-                content.secondaryText = "Sends this run's log and the previous one (useful after a crash)"
+                content.secondaryText = "Save or send this run's log and the previous one yourself"
                 content.textProperties.color = .systemBlue
             }
         }
@@ -253,7 +274,9 @@ final class SettingsViewController: UITableViewController {
 
     override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
-        if indexPath.section == Section.device.rawValue, indexPath.row == 1 { shareLogs(from: tableView.cellForRow(at: indexPath)); return }
+        if indexPath.section == Section.device.rawValue, indexPath.row == 1 { sendLog(); return }
+        if indexPath.section == Section.device.rawValue, indexPath.row == 2 { shareLogs(from: tableView.cellForRow(at: indexPath)); return }
+        if indexPath.section == Section.controls.rawValue, indexPath.row == 7 { editLayout?(); return }
         if indexPath.section == Section.mode.rawValue {
             settings.gameMode = GameMode.allCases[indexPath.row]
             gameModeChanged?()
@@ -441,6 +464,15 @@ final class SettingsViewController: UITableViewController {
         let (w, h) = GraphicsConfiguration.size(for: engineRunning ? bootPreset : settings.graphicsPreset, renderHeight: settings.renderHeight,
                                                 screen: screen, matchScreenShape: settings.matchScreenShape)
         return "Renders at \(w)×\(h)"
+    }
+    /// Uploads the logs after the player confirms, with an optional note (its own screen, so the
+    /// keyboard never covers Send in landscape).
+    private func sendLog() {
+        let screen = SendLogViewController()
+        screen.finished = { [weak self] title, message in self?.showAlert(title, message) }
+        let nav = UINavigationController(rootViewController: screen)
+        nav.modalPresentationStyle = .fullScreen
+        present(nav, animated: true)
     }
     private func shareLogs(from cell: UITableViewCell?) {
         let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]

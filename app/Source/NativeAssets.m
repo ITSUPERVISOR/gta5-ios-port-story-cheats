@@ -290,9 +290,18 @@ static int64_t readAssetImpl(uint32_t id,uint64_t offset,uint8_t *destination,ui
   @try {return readAssetPackedLocked(id,offset,destination,length);}
   @finally {[lock unlock];}
 }
+// Health counters for the periodic log line (Settings > Share log).
+static _Atomic uint64_t healthReads,healthReadBytes,healthReadErrors,healthShortReads,healthSlowReads,healthReadMicros;
+void PGAssetHealth(uint64_t out[6]){out[0]=healthReads;out[1]=healthReadBytes;out[2]=healthReadErrors;out[3]=healthShortReads;out[4]=healthSlowReads;out[5]=healthReadMicros;}
 static int64_t readAsset(uint32_t id,uint64_t offset,uint8_t *destination,uint32_t length){
   assetReadNetworkMS=assetReadLockMS=0;assetReadNetworkBytes=0;assetReadSource=2;
-  double start=assetTimingFD>=0?assetNowMS():0;int64_t result=readAssetImpl(id,offset,destination,length);
+  double healthStart=assetNowMS();
+  double start=assetTimingFD>=0?healthStart:0;int64_t result=readAssetImpl(id,offset,destination,length);
+  double took=assetNowMS()-healthStart;
+  atomic_fetch_add(&healthReads,1);atomic_fetch_add(&healthReadMicros,(uint64_t)(took*1000));
+  if(result<0)atomic_fetch_add(&healthReadErrors,1);
+  else{atomic_fetch_add(&healthReadBytes,(uint64_t)result);if((uint64_t)result<length)atomic_fetch_add(&healthShortReads,1);}
+  if(took>250)atomic_fetch_add(&healthSlowReads,1);
   if(assetTimingFD>=0&&atomic_fetch_add(&assetTimingRecords,1)<200000){char record[256];int n=snprintf(record,sizeof record,"%.3f,%.3f,%u,%llu,%u,%lld,%u,%u,%.3f,%.3f,%llu\n",start,assetNowMS(),id,offset,length,result,assetReadSource,assetPrefetchRead,assetReadNetworkMS,assetReadLockMS,assetReadNetworkBytes);if(n>0&&n<sizeof record)write(assetTimingFD,record,(size_t)n);}
   return result;
 }
