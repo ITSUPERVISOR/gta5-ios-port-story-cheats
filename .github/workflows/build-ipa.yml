@@ -1,19 +1,32 @@
-# Builds YOUR unsigned IPA from YOUR game files on YOUR server.
-# Run it from the Actions tab of your own PRIVATE copy of this repository.
+# Builds YOUR unsigned IPA from YOUR game files.
+# Run it from the Actions tab of your own PRIVATE copy of this repository
+# (or let the website builder start it for you).
 name: Build my IPA
 
 on:
   workflow_dispatch:
     inputs:
+      game_files:
+        description: "Where the build gets your game files"
+        type: choice
+        options:
+          - my server (Tailscale)
+          - uploaded with the website builder
+        default: my server (Tailscale)
       paid_account:
         description: "I have a paid Apple developer account (request extra memory)"
         type: boolean
         default: false
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: macos-15
     timeout-minutes: 240
+    env:
+      FROM_UPLOAD: ${{ inputs.game_files == 'uploaded with the website builder' }}
     steps:
       - name: Refuse to build in a public repository
         if: ${{ !github.event.repository.private }}
@@ -23,12 +36,21 @@ jobs:
 
       - uses: actions/checkout@v4
 
+      - name: Get the files you uploaded with the website builder
+        if: ${{ env.FROM_UPLOAD == 'true' }}
+        uses: actions/checkout@v4
+        with:
+          ref: build-inputs
+          path: uploaded-inputs
+
       - name: Join your tailnet (to reach your game-file server)
+        if: ${{ env.FROM_UPLOAD != 'true' }}
         uses: tailscale/github-action@v4
         with:
           authkey: ${{ secrets.TS_AUTHKEY }}
 
       - name: Check your server answers
+        if: ${{ env.FROM_UPLOAD != 'true' }}
         env:
           SERVER: ${{ secrets.GAME_SERVER_URL }}
         run: |
@@ -57,7 +79,13 @@ jobs:
         env:
           SERVER: ${{ secrets.GAME_SERVER_URL }}
           JOBS: "2"
-        run: ./build_ipa.sh "$SERVER" ${{ inputs.paid_account && '--paid' || '' }}
+        run: |
+          if [ "$FROM_UPLOAD" = "true" ]; then
+            /usr/bin/python3 app/Scripts/assemble_inputs.py --inputs uploaded-inputs --out "$RUNNER_TEMP/game-files"
+            ./build_ipa.sh --mirror "$RUNNER_TEMP/game-files" ${{ inputs.paid_account && '--paid' || '' }}
+          else
+            ./build_ipa.sh "$SERVER" ${{ inputs.paid_account && '--paid' || '' }}
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
@@ -65,3 +93,10 @@ jobs:
           path: GTA5Port.ipa
           retention-days: 3
 
+      - name: Publish the IPA as a release in this private repository (easy to download on a phone)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest-ipa --repo "${{ github.repository }}" --yes --cleanup-tag 2>/dev/null || true
+          gh release create latest-ipa GTA5Port.ipa --repo "${{ github.repository }}" --title "Your app (built $(date -u +%Y-%m-%d))" \
+            --notes "Download GTA5Port.ipa and open it with SideStore or AltStore. This release is private like the repository."

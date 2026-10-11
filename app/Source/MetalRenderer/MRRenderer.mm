@@ -404,7 +404,11 @@ static void createTexture(const uint32_t *p) {
 	bool gpuWritten = (bind & (BIND_RT | BIND_DS | BIND_UAV)) || samples > 1 || t->isDepth;
 	t->shared = !gpuWritten;
 	desc.storageMode = t->shared ? MTLStorageModeShared : MTLStorageModePrivate;
-	if (m.a8) desc.swizzle = MTLTextureSwizzleChannelsMake(MTLTextureSwizzleZero, MTLTextureSwizzleZero, MTLTextureSwizzleZero, MTLTextureSwizzleRed);
+	// A8 is stored as R8 and read as (0,0,0,R). Metal forbids swizzles on render targets, so those get
+	// the swizzle on the views shaders sample instead.
+	if (m.a8 && !(usage & (MTLTextureUsageRenderTarget | MTLTextureUsageShaderWrite)))
+		desc.swizzle = MTLTextureSwizzleChannelsMake(MTLTextureSwizzleZero, MTLTextureSwizzleZero, MTLTextureSwizzleZero, MTLTextureSwizzleRed);
+	else if (m.a8) { t->alphaView = true; desc.usage |= MTLTextureUsagePixelFormatView; }
 	t->tex = [R->device newTextureWithDescriptor:desc];
 	if (!t->tex) logOnce("tex" + std::to_string(dxgi) + "x" + std::to_string(bind), "Metal renderer: texture %ux%u dxgi %u bind %#x could not be created", w, h, dxgi, bind);
 	R->objs.set(id, t);
@@ -568,11 +572,14 @@ static id<MTLTexture> srvTexture(View *v, Texture *t, const ResBinding &b) {
 	}
 	if (b.dim == D3 && t->dim != 3) return nil;
 	if (b.dim != D3 && t->dim == 3) return nil;
-	if (type == t->tex.textureType && fmt == t->format && base == 0 && count == mips && first == 0 && slices == (t->dim == 3 ? 1 : layers)) return t->tex;
+	if (!t->alphaView && type == t->tex.textureType && fmt == t->format && base == 0 && count == mips && first == 0 && slices == (t->dim == 3 ? 1 : layers)) return t->tex;
 	uint64_t key = fnv(fnv(fnv(fnv(fnv(1469598103934665603ull, type), fmt), base | ((uint64_t)count << 16)), first), slices);
 	auto it = v->views.find(key);
 	if (it != v->views.end()) return it->second;
-	id<MTLTexture> out = [t->tex newTextureViewWithPixelFormat:fmt textureType:type levels:NSMakeRange(base, count) slices:NSMakeRange(first, slices)];
+	id<MTLTexture> out = t->alphaView
+		? [t->tex newTextureViewWithPixelFormat:fmt textureType:type levels:NSMakeRange(base, count) slices:NSMakeRange(first, slices)
+		                                swizzle:MTLTextureSwizzleChannelsMake(MTLTextureSwizzleZero, MTLTextureSwizzleZero, MTLTextureSwizzleZero, MTLTextureSwizzleRed)]
+		: [t->tex newTextureViewWithPixelFormat:fmt textureType:type levels:NSMakeRange(base, count) slices:NSMakeRange(first, slices)];
 	if (!out) logOnce("view" + std::to_string(t->oid), "Metal renderer: SRV view failed (texture %u)", t->oid);
 	v->views[key] = out;
 	return out;

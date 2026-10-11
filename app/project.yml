@@ -76,13 +76,16 @@ targets:
       path: App/Info.plist
       properties:
         CFBundleDisplayName: GTA V Port
-        CFBundleShortVersionString: "1.1"
+        CFBundleShortVersionString: "1.2"
         # Your game-file server may be a plain-http address on your tailnet.
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
         # Filled in by the cloud build so you don't have to type it.
         PGDefaultAssetServer: ""
-        CFBundleVersion: "2"
+        # The app folder (logs) is visible in the Files app.
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        CFBundleVersion: "3"
         UILaunchScreen: {}
         UIRequiresFullScreen: true
         UISupportedInterfaceOrientations:

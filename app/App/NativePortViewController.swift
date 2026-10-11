@@ -2,6 +2,7 @@ import UIKit
 import MetalKit
 import GameController
 import AVFAudio
+import UniformTypeIdentifiers
 
 private func engineLog(_ message: UnsafePointer<CChar>?, _ context: UnsafeMutableRawPointer?) {
     guard let message, let context else { return }
@@ -10,7 +11,7 @@ private func engineLog(_ message: UnsafePointer<CChar>?, _ context: UnsafeMutabl
     DispatchQueue.main.async { controller.appendLog(line) }
 }
 
-final class NativePortViewController: UIViewController, MTKViewDelegate {
+final class NativePortViewController: UIViewController, MTKViewDelegate, UIDocumentPickerDelegate {
     private var metalView: MTKView!
     private var queue: MTLCommandQueue?
     private let output = UITextView()
@@ -113,9 +114,15 @@ final class NativePortViewController: UIViewController, MTKViewDelegate {
         settingsButton.addAction(UIAction { [weak self] _ in self?.showSettings() }, for: .touchUpInside)
         serverButton.contentHorizontalAlignment = .leading
         serverButton.titleLabel?.numberOfLines = 0
-        serverButton.addAction(UIAction { [weak self] _ in self?.askForAssetServer() }, for: .touchUpInside)
+        serverButton.addAction(UIAction { [weak self] _ in self?.askForGameFiles() }, for: .touchUpInside)
         updateServerStatus()
-        if !GameSettings.shared.assetServer.isEmpty { testAssetServer() }
+        // Debug/automation: --local-game-folder /path (a folder the app can already read) skips the picker.
+        if let index = ProcessInfo.processInfo.arguments.firstIndex(of: "--local-game-folder"), index + 1 < ProcessInfo.processInfo.arguments.count {
+            let folder = URL(fileURLWithPath: ProcessInfo.processInfo.arguments[index + 1])
+            if let problem = GameFolder.choose(folder) { appendLog("Game folder refused: " + problem) }
+        }
+        if GameFolder.isChosen { updateServerStatus() }
+        else if !GameSettings.shared.assetServer.isEmpty { testAssetServer() }
         // Debug/automation: --game-mode story|sandbox picks the mode before Play.
         let arguments = ProcessInfo.processInfo.arguments
         if let index = arguments.firstIndex(of: "--game-mode"), index + 1 < arguments.count {
@@ -193,6 +200,10 @@ final class NativePortViewController: UIViewController, MTKViewDelegate {
         ])
         let directory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         logFile = directory.appendingPathComponent("native-port.log")
+        // Keep the previous run's log: after a crash it is the one worth sharing (Settings, Share log).
+        let previous = directory.appendingPathComponent("native-port-previous.log")
+        try? FileManager.default.removeItem(at: previous)
+        try? FileManager.default.moveItem(at: logFile!, to: previous)
         try? Data().write(to: logFile!)
         appendLog("Native UIKit + Metal host. Engine compiled into the app; no WebView or JIT.")
         appendLog("Metal device: \(device?.name ?? "unavailable")")
@@ -202,7 +213,10 @@ final class NativePortViewController: UIViewController, MTKViewDelegate {
         NotificationCenter.default.addObserver(self, selector: #selector(controllerChanged), name: .GCControllerDidConnect, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(releaseTouchControls), name: UIApplication.willResignActiveNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(leftApp), name: UIApplication.didEnterBackgroundNotification, object: nil)
-        if let message = GameSettings.shared.recoverFromFailedBoot() { appendLog(message); controllerLabel.text = message; controllerLabel.numberOfLines = 0 }
+        if let recovery = GameSettings.shared.recoverFromFailedBoot() {
+            appendLog("Previous launch on \(recovery.failed.title) did not finish; lowered to \(recovery.fallback.title)\(recovery.resetHeight.map { ", resolution \($0)p back to Auto" } ?? "").")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { self.explainRecovery(recovery) }
+        }
         if ProcessInfo.processInfo.arguments.contains("--touch-controls-preview") {
             diagnosticsOverlay?.isHidden = true
             touchControlsAvailable = true
@@ -325,7 +339,16 @@ final class NativePortViewController: UIViewController, MTKViewDelegate {
         startAudio()
         let (root, rootNote) = EnginePaths.filesRoot()
         if let rootNote { appendLog(rootNote) }
-        PGSetAssetServer(GameSettings.shared.assetServer)
+        if GameFolder.isChosen {
+            guard let data = GameFolder.open() else {
+                appendLog("The game folder on this iPhone can't be opened any more. Choose it again.")
+                GameFolder.clear(); updateServerStatus(); launchButton.isEnabled = true; launchButton.setTitle("Play", for: .normal)
+                return
+            }
+            PGSetLocalGameFolder(data.path)
+        } else {
+            PGSetAssetServer(GameSettings.shared.assetServer)
+        }
         AssetPreloader.shared.engineRunning = true
         path.withCString { manifest in
             root.withCString { PGStartEngine(manifest, $0, engineLog, Unmanaged.passUnretained(self).toOpaque()) }
@@ -407,6 +430,8 @@ final class NativePortViewController: UIViewController, MTKViewDelegate {
             // Simulator runs are silent unless --sound is passed (test runs play through the Mac's speakers).
             if !ProcessInfo.processInfo.arguments.contains("--sound") { audioEngine.mainMixerNode.outputVolume = 0 }
             #endif
+            // Silent test runs on a phone.
+            if ProcessInfo.processInfo.arguments.contains("--mute") { audioEngine.mainMixerNode.outputVolume = 0 }
             try audioEngine.start()
         } catch { appendLog("Native audio setup failed: \(error.localizedDescription)") }
     }
@@ -418,9 +443,38 @@ final class NativePortViewController: UIViewController, MTKViewDelegate {
     /// Shows the server and whether it answers; Play needs a working server.
     private func updateServerStatus(_ status: String? = nil) {
         let server = GameSettings.shared.assetServer
-        let text = server.isEmpty ? "Game file server: not set. Tap to enter it." : "Game file server: \(server)\(status.map { " · " + $0 } ?? "")"
+        let text: String
+        if GameFolder.isChosen { text = "Game files: \"\(GameFolder.name)\" on this iPhone ✓ (tap to change)" }
+        else if server.isEmpty { text = "Game files: not set. Tap to choose a folder on this iPhone or your computer." }
+        else { text = "Game files: from \(server)\(status.map { " · " + $0 } ?? "")" }
         serverButton.setTitle(text, for: .normal)
-        launchButton.isEnabled = !server.isEmpty && !engineStarted
+        launchButton.isEnabled = (GameFolder.isChosen || !server.isEmpty) && !engineStarted
+    }
+    /// Where the game files come from: a folder on this iPhone, or a server (your computer).
+    private func askForGameFiles() {
+        guard !engineStarted else { return }
+        let sheet = UIAlertController(title: "Where are your game files?", message: "A folder on this iPhone plays without a computer. Your computer works too, through Tailscale.", preferredStyle: .actionSheet)
+        sheet.addAction(UIAlertAction(title: "A folder on this iPhone", style: .default) { [weak self] _ in self?.pickGameFolder() })
+        sheet.addAction(UIAlertAction(title: "My computer (server address)", style: .default) { [weak self] _ in self?.askForAssetServer() })
+        sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        sheet.popoverPresentationController?.sourceView = serverButton
+        present(sheet, animated: true)
+    }
+    private func pickGameFolder() {
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.folder])
+        picker.delegate = self
+        picker.allowsMultipleSelection = false
+        present(picker, animated: true)
+    }
+    func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+        guard let folder = urls.first else { return }
+        updateServerStatus("checking the folder…")
+        if let problem = GameFolder.choose(folder) {
+            let alert = UIAlertController(title: "That folder can't be used", message: problem, preferredStyle: .alert)
+            alert.addAction(UIAlertAction(title: "OK", style: .default))
+            present(alert, animated: true)
+        }
+        updateServerStatus()
     }
     private func askForAssetServer() {
         let alert = UIAlertController(title: "Game file server", message: "The address of the computer that serves your own copy of the game files, for example https://my-pc.tailnet-name.ts.net", preferredStyle: .alert)
@@ -433,6 +487,7 @@ final class NativePortViewController: UIViewController, MTKViewDelegate {
         }
         alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
         alert.addAction(UIAlertAction(title: "Save and test", style: .default) { [weak self, weak alert] _ in
+            GameFolder.clear()
             GameSettings.shared.assetServer = alert?.textFields?.first?.text ?? ""
             self?.testAssetServer()
         })
@@ -457,6 +512,33 @@ final class NativePortViewController: UIViewController, MTKViewDelegate {
             }
         }.resume()
     }
+    /// The popup after a launch that ran out of memory: what happened, what changed, and the way back.
+    private func explainRecovery(_ recovery: GameSettings.BootRecovery) {
+        let lowered = recovery.fallback != recovery.failed
+        let title = lowered ? "Graphics lowered to \(recovery.fallback.title)" : "Resolution set back to Auto"
+        var message = "The game closed while starting on \(recovery.failed.title)"
+        if let height = recovery.resetHeight { message += " at \(height)p" }
+        message += ". That usually means this setting needs more memory than iOS gives the app on this iPhone (about \(recovery.memoryLimitMB) MB)."
+        message += lowered ? "\n\nThe game now starts on \(recovery.fallback.title)" : "\n\nThe game now starts at its usual resolution"
+        message += recovery.resetHeight != nil && lowered ? " with Auto resolution." : "."
+        message += " You can change this any time in Settings."
+        let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "OK", style: .cancel))
+        alert.addAction(UIAlertAction(title: "Share log", style: .default) { _ in
+            let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            let logs = ["native-port-previous.log", "native-port.log"].map { documents.appendingPathComponent($0) }
+                .filter { FileManager.default.fileExists(atPath: $0.path) }
+            let sheet = UIActivityViewController(activityItems: logs, applicationActivities: nil)
+            sheet.popoverPresentationController?.sourceView = self.view
+            self.present(sheet, animated: true)
+        })
+        alert.addAction(UIAlertAction(title: "Try \(recovery.failed.title) again", style: .destructive) { _ in
+            GameSettings.shared.undoRecovery(recovery)
+            self.appendLog("Kept \(recovery.failed.title) after the warning.")
+        })
+        present(alert, animated: true)
+    }
+
     @objc private func leftApp() { if stableTimer?.isValid != false { GameSettings.shared.markBootInterrupted() } }
 
     private func showSettings() {
@@ -473,7 +555,7 @@ final class NativePortViewController: UIViewController, MTKViewDelegate {
     private func applyLiveResolution() {
         guard engineStarted else { return }
         let settings = GameSettings.shared
-        let (width, height) = GraphicsConfiguration.size(for: bootedPreset, scale: settings.resolutionScale, screen: view.bounds.size, matchScreenShape: settings.matchScreenShape)
+        let (width, height) = GraphicsConfiguration.size(for: bootedPreset, renderHeight: settings.renderHeight, screen: view.bounds.size, matchScreenShape: settings.matchScreenShape)
         PGSetBackBufferSize(Int32(width), Int32(height))
         appendLog("Graphics: live resize to \(width)×\(height)")
     }

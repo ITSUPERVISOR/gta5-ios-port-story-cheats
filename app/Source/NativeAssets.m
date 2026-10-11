@@ -18,6 +18,15 @@ void PGSetAssetServer(const char *url){
   assetServer=value;
 }
 NSString *PGAssetServer(void){return assetServer;}
+
+// A folder on this device with the game's data/ files (chosen in the app):
+// every asset read goes straight to the file; no server, no download cache.
+static NSString *localDataRoot;
+void PGSetLocalGameFolder(const char *dataPath){
+  localDataRoot=dataPath&&*dataPath?[NSString stringWithUTF8String:dataPath]:nil;
+  if(localDataRoot)pg_log("Game files are read from the folder on this device; no server is used.");
+}
+bool PGUsingLocalGameFolder(void){return localDataRoot!=nil;}
 #include "NativeAssetHints.h"
 
 @interface PGAssetCondition : NSCondition
@@ -112,7 +121,12 @@ void pg_assets_configure(const char *manifest,const char *root) {
     prefetchQueue=dispatch_queue_create("playgta5.assets.prefetch",assetBalancedQOS?dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_CONCURRENT,QOS_CLASS_UTILITY,0):DISPATCH_QUEUE_CONCURRENT);
     speculativeQueue=assetBalancedQOS?dispatch_queue_create("playgta5.assets.speculation",dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_CONCURRENT,QOS_CLASS_BACKGROUND,0)):prefetchQueue;
     pg_log(assetBalancedQOS?"Native background asset priorities: utility hints, background speculation (opt-in).":"Native background asset priorities: original.");
-    [[assetSession dataTaskWithURL:[NSURL URLWithString:[assetServer stringByAppendingString:@"/data/manifest.json"]] completionHandler:^(NSData *body,NSURLResponse *response,NSError *error){
+#if TARGET_OS_SIMULATOR
+    // Simulator profiling: PG_LOCAL_MIRROR (folder with data/) reads the Mac's copy directly.
+    const char *mirror=getenv("PG_LOCAL_MIRROR");
+    if(!localDataRoot&&!assetStreamSimulation&&mirror)localDataRoot=[[NSString stringWithUTF8String:mirror] stringByAppendingPathComponent:@"data"];
+#endif
+    if(!localDataRoot)[[assetSession dataTaskWithURL:[NSURL URLWithString:[assetServer stringByAppendingString:@"/data/manifest.json"]] completionHandler:^(NSData *body,NSURLResponse *response,NSError *error){
       if(error){NSString *message=[@"Asset server connection failed: " stringByAppendingString:error.localizedDescription];pg_log(message.UTF8String);}
       else if([(NSHTTPURLResponse *)response statusCode]==200){pg_log("Connected to the asset server.");}
       else {NSString *message=[NSString stringWithFormat:@"Asset server probe HTTP %ld, URL %@, server %@",(long)[(NSHTTPURLResponse *)response statusCode],response.URL,[(NSHTTPURLResponse *)response valueForHTTPHeaderField:@"Server"]];pg_log(message.UTF8String);}
@@ -154,10 +168,6 @@ static int64_t readAssetLegacyLocked(uint32_t id,uint64_t offset,uint8_t *destin
   if(offset>=size)return 0;length=(uint32_t)MIN((uint64_t)length,size-offset);
 #if TARGET_OS_SIMULATOR
   // Profiling uses the identical mirror directly, without a second asset cache.
-  const char *mirror=getenv("PG_LOCAL_MIRROR");
-  if(!assetStreamSimulation&&mirror){NSString *local=[[[NSString stringWithUTF8String:mirror] stringByAppendingPathComponent:@"data"] stringByAppendingPathComponent:path];
-    int descriptor=open(local.fileSystemRepresentation,O_RDONLY);
-    if(descriptor>=0){ssize_t actual=pread(descriptor,destination,length,(off_t)offset);close(descriptor);return actual;}}
 #endif
   NSString *directory=[cacheRoot stringByAppendingPathComponent:[NSString stringWithFormat:@"%u",id]];
   [[NSFileManager defaultManager] createDirectoryAtPath:directory withIntermediateDirectories:YES attributes:nil error:nil];
@@ -248,8 +258,21 @@ static int64_t readAssetPackedLocked(uint32_t id,uint64_t offset,uint8_t *destin
 }
 // Cached reads bypass fills. Missing ranges reserve blocks while downloading
 // outside the archive lock; overlapping reads wait for that one shared fill.
+static int64_t readLocalAsset(uint32_t id,uint64_t offset,uint8_t *destination,uint32_t length){
+  NSArray *entry=assetFiles[id];uint64_t size=[entry[1] unsignedLongLongValue];
+  if(!length||offset>=size)return 0;
+  length=(uint32_t)MIN((uint64_t)length,size-offset);
+  NSString *file=[localDataRoot stringByAppendingPathComponent:entry[0]];
+  int descriptor=open(file.fileSystemRepresentation,O_RDONLY);
+  if(descriptor<0){NSString *message=[@"Game file missing from your folder: " stringByAppendingString:entry[0]];pg_log(message.UTF8String);return -1;}
+  uint64_t done=0;
+  while(done<length){ssize_t n=pread(descriptor,destination+done,length-done,(off_t)(offset+done));if(n<=0)break;done+=(uint64_t)n;}
+  close(descriptor);assetReadSource=4;
+  return (int64_t)done;
+}
 static int64_t readAssetImpl(uint32_t id,uint64_t offset,uint8_t *destination,uint32_t length) {
   if(id>=assetFiles.count)return -1;
+  if(localDataRoot)return readLocalAsset(id,offset,destination,length);
   if(assetTraceFD>=0&&length){char record[96];int n=snprintf(record,sizeof record,"%u,%llu,%u\n",id,offset,length);if(n>0&&n<sizeof record)write(assetTraceFD,record,(size_t)n);}
 #if TARGET_OS_SIMULATOR
   if(assetStreamSimulation){
@@ -276,6 +299,7 @@ static int64_t readAsset(uint32_t id,uint64_t offset,uint8_t *destination,uint32
 static _Atomic bool assetEngineBooted;
 void pg_assets_prewarm(void){
   atomic_store(&assetEngineBooted,true);
+  if(localDataRoot){pg_log("Startup asset warming skipped: the game files are on this device.");pg_log("ASSET_WARM_COMPLETE");return;}
 #if TARGET_OS_SIMULATOR
   if(!assetStreamSimulation||[NSProcessInfo.processInfo.arguments containsObject:@"--skip-asset-warm"]){pg_log("Simulator startup asset warming skipped.");return;}
 #endif
@@ -436,7 +460,7 @@ void w2c_env_wasm_httpfs_io_start_js(struct w2c_env *host,u64 table) {
 
 void PGAssetCachePrepare(const char *manifestPath,const char *filesRoot){pg_assets_configure(manifestPath,filesRoot);}
 bool PGAssetPreloadSupported(void){
-  if(!assetFiles.count||!packedRoot)return false;
+  if(!assetFiles.count||!packedRoot||localDataRoot)return false;
 #if TARGET_OS_SIMULATOR
   return assetStreamSimulation;
 #else

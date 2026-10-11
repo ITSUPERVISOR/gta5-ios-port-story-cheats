@@ -28,6 +28,10 @@ void PGSetStartMode(int32_t mode);
 void PGSetBackBufferSize(int width, int height);
 // Base URL of your own game-file server, e.g. https://pc.tailnet.ts.net
 void PGSetAssetServer(const char *url);
+// Before PGStartEngine: a folder on this device that contains the game's data/
+// files (the app holds security-scoped access to it); NULL streams from the server.
+void PGSetLocalGameFolder(const char *dataPath);
+bool PGUsingLocalGameFolder(void);
 void PGStartEngine(const char *manifestPath, const char *filesRoot, PGLogCallback, void *context);
 void PGUpdateController(PGControllerState state, double elapsedSeconds);
 // Player context: 0 on foot, otherwise the vehicle type + 1 (see NativeTouchContext.h).

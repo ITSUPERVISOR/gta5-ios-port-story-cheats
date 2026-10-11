@@ -87,6 +87,9 @@ final class AssetPreloader {
     }
 
     var phase: Phase {
+        if GameFolder.isChosen {
+            return .unavailable("The game files are already on this iPhone (folder \"\(GameFolder.name)\"), so nothing needs downloading.")
+        }
         if prepared && !PGAssetPreloadSupported() {
             return .unavailable("The simulator reads the Mac's game files directly. Launch with --stream-assets to test downloads.")
         }

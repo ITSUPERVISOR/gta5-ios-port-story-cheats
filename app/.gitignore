@@ -5,3 +5,4 @@ Resources/manifest.json
 *.xcuserstate
 xcuserdata/
 GeneratedResources/
+__pycache__/

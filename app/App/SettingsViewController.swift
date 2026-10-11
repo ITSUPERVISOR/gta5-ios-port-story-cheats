@@ -40,9 +40,11 @@ final class SettingsViewController: UITableViewController {
         NotificationCenter.default.addObserver(self, selector: #selector(preloadChanged), name: .assetPreloadChanged, object: nil)
         preloader.refresh()
         let arguments = ProcessInfo.processInfo.arguments
-        if let i = arguments.firstIndex(of: "--settings-section"), i + 1 < arguments.count, arguments[i + 1] == "files" {
+        if let i = arguments.firstIndex(of: "--settings-section"), i + 1 < arguments.count,
+           let section = ["files": Section.files, "graphics": Section.graphics, "resolution": Section.graphics][arguments[i + 1]] {
+            let row = arguments[i + 1] == "resolution" ? settings.tier.allowed.count : 0
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                self.tableView.scrollToRow(at: IndexPath(row: 0, section: Section.files.rawValue), at: .top, animated: false)
+                self.tableView.scrollToRow(at: IndexPath(row: row, section: section.rawValue), at: .middle, animated: false)
             }
         }
     }
@@ -56,7 +58,7 @@ final class SettingsViewController: UITableViewController {
         case .controls: return 6
         case .gyro: return (settings.gyroAim == .off ? 1 : 3) + (settings.tiltSteer == .off ? 1 : 2)
         case .files: return fileRows.count
-        case .device: return 1
+        case .device: return 2
         }
     }
 
@@ -104,30 +106,30 @@ final class SettingsViewController: UITableViewController {
             if indexPath.row < presets.count {
                 let preset = presets[indexPath.row]
                 content.text = preset.title + (preset == settings.tier.recommended ? " (recommended)" : "")
-                content.secondaryText = "\(preset.height)p · " + preset.detail
+                content.secondaryText = "Detail level, default \(preset.height)p · " + preset.detail + (settings.tier.risky(preset) ? "\n⚠︎ Heavier than this phone's recommended setting: may run out of memory or overheat." : "")
+                if settings.tier.risky(preset) { content.secondaryTextProperties.color = .systemOrange }
                 cell.accessoryType = preset == settings.graphicsPreset ? .checkmark : .none
             } else {
                 let row = indexPath.row - presets.count
                 cell.selectionStyle = .none
                 if row == 0 {
-                    content.text = "Resolution scale \(Int((settings.resolutionScale * 100).rounded()))%"
-                    content.secondaryText = currentSizeText()
-                    let slider = UISlider()
-                    slider.minimumValue = 0.5; slider.maximumValue = 1
-                    slider.value = Float(settings.resolutionScale)
-                    slider.frame.size.width = 150
-                    slider.accessibilityLabel = "Resolution scale"
-                    slider.addAction(UIAction { [weak self, weak slider] _ in
-                        guard let self, let slider else { return }
-                        self.settings.resolutionScale = (Double(slider.value) * 20).rounded() / 20
-                        var updated = cell.defaultContentConfiguration()
-                        updated.text = "Resolution scale \(Int((self.settings.resolutionScale * 100).rounded()))%"
-                        updated.secondaryText = self.currentSizeText()
-                        updated.secondaryTextProperties.color = .secondaryLabel
-                        cell.contentConfiguration = updated
-                    }, for: .valueChanged)
-                    slider.addAction(UIAction { [weak self] _ in self?.resolutionChanged?() }, for: [.touchUpInside, .touchUpOutside])
-                    cell.accessoryView = slider
+                    content.text = "Resolution"
+                    content.secondaryText = currentSizeText() + " · changes right away"
+                    let button = UIButton(type: .system)
+                    button.setTitle(resolutionTitle(settings.renderHeight) + " ▾", for: .normal)
+                    button.showsMenuAsPrimaryAction = true
+                    button.accessibilityLabel = "Resolution"
+                    let choices = [0] + GraphicsConfiguration.resolutionChoices
+                    button.menu = UIMenu(children: choices.map { height in
+                        UIAction(title: resolutionTitle(height), state: height == settings.renderHeight ? .on : .off) { [weak self] _ in
+                            guard let self else { return }
+                            self.settings.renderHeight = height
+                            self.resolutionChanged?()
+                            self.reloadFooters()
+                        }
+                    })
+                    button.sizeToFit()
+                    cell.accessoryView = button
                 } else if row == 1 {
                     content.text = "Fill the screen"
                     content.secondaryText = "Render at the screen's shape instead of stretching 16:9"
@@ -234,10 +236,16 @@ final class SettingsViewController: UITableViewController {
         case .files:
             configureFileCell(cell, &content, fileRows[indexPath.row])
         case .device:
-            content.text = settings.tier.summary
-            content.textProperties.font = .preferredFont(forTextStyle: .footnote)
-            content.textProperties.color = .secondaryLabel
-            cell.selectionStyle = .none
+            if indexPath.row == 0 {
+                content.text = settings.tier.summary
+                content.textProperties.font = .preferredFont(forTextStyle: .footnote)
+                content.textProperties.color = .secondaryLabel
+                cell.selectionStyle = .none
+            } else {
+                content.text = "Share log"
+                content.secondaryText = "Sends this run's log and the previous one (useful after a crash)"
+                content.textProperties.color = .systemBlue
+            }
         }
         cell.contentConfiguration = content
         return cell
@@ -245,6 +253,7 @@ final class SettingsViewController: UITableViewController {
 
     override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
+        if indexPath.section == Section.device.rawValue, indexPath.row == 1 { shareLogs(from: tableView.cellForRow(at: indexPath)); return }
         if indexPath.section == Section.mode.rawValue {
             settings.gameMode = GameMode.allCases[indexPath.row]
             gameModeChanged?()
@@ -429,9 +438,26 @@ final class SettingsViewController: UITableViewController {
 
     private func currentSizeText() -> String {
         let screen = view.window?.windowScene?.screen.bounds.size ?? UIScreen.main.bounds.size
-        let (w, h) = GraphicsConfiguration.size(for: engineRunning ? bootPreset : settings.graphicsPreset, scale: settings.resolutionScale,
+        let (w, h) = GraphicsConfiguration.size(for: engineRunning ? bootPreset : settings.graphicsPreset, renderHeight: settings.renderHeight,
                                                 screen: screen, matchScreenShape: settings.matchScreenShape)
         return "Renders at \(w)×\(h)"
+    }
+    private func shareLogs(from cell: UITableViewCell?) {
+        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let logs = ["native-port.log", "native-port-previous.log"].map { documents.appendingPathComponent($0) }
+            .filter { FileManager.default.fileExists(atPath: $0.path) }
+        guard !logs.isEmpty else { showAlert("No log yet", "Start the game once, then try again."); return }
+        let sheet = UIActivityViewController(activityItems: logs, applicationActivities: nil)
+        sheet.popoverPresentationController?.sourceView = cell ?? view
+        present(sheet, animated: true)
+    }
+    private func resolutionTitle(_ height: Int) -> String {
+        if height == 0 {
+            let screen = view.window?.windowScene?.screen.bounds.size ?? UIScreen.main.bounds.size
+            let (_, h) = GraphicsConfiguration.size(for: engineRunning ? bootPreset : settings.graphicsPreset, renderHeight: 0, screen: screen, matchScreenShape: settings.matchScreenShape)
+            return "Auto (\(h)p)"
+        }
+        return height == GraphicsConfiguration.nativeHeight ? "Native (\(height)p)" : "\(height)p"
     }
     private func reloadFooters() {
         UIView.performWithoutAnimation { tableView.reloadSections([Section.graphics.rawValue], with: .none) }

@@ -99,7 +99,8 @@ final class GameSettings {
     // Graphics. The default comes from the measured device tier.
     lazy var tier = DeviceTier.probe()
     var graphicsPreset: GraphicsPreset {
-        get { (defaults.object(forKey: "graphicsPreset") as? Int).flatMap(GraphicsPreset.init) ?? tier.recommended }
+        // integer(forKey:) also reads "-graphicsPreset 4" given as a launch argument (a string).
+        get { defaults.object(forKey: "graphicsPreset") != nil ? GraphicsPreset(rawValue: defaults.integer(forKey: "graphicsPreset")) ?? tier.recommended : tier.recommended }
         set { defaults.set(newValue.rawValue, forKey: "graphicsPreset") }
     }
     var resolutionScale: Double {
@@ -107,6 +108,11 @@ final class GameSettings {
         set { defaults.set(min(max(newValue, 0.5), 1.0), forKey: "resolutionScale") }
     }
     /// Render at the screen's shape instead of a stretched 16:9 picture.
+    /// Render height in pixels, changeable while playing; 0 follows the detail preset.
+    var renderHeight: Int {
+        get { defaults.integer(forKey: "renderHeight") }
+        set { defaults.set(max(0, newValue), forKey: "renderHeight") }
+    }
     var matchScreenShape: Bool {
         get { defaults.object(forKey: "matchScreenShape") as? Bool ?? true }
         set { defaults.set(newValue, forKey: "matchScreenShape") }
@@ -126,25 +132,48 @@ final class GameSettings {
         get { (defaults.object(forKey: "lastGoodPreset") as? Int).flatMap(GraphicsPreset.init) }
         set { defaults.set(newValue?.rawValue, forKey: "lastGoodPreset") }
     }
-    /// Returns a message when the previous launch failed and settings were lowered.
-    func recoverFromFailedBoot() -> String? {
+    /// What changed after a launch that did not finish (shown once, in a popup, on the next start).
+    struct BootRecovery {
+        let failed: GraphicsPreset
+        let fallback: GraphicsPreset
+        /// The custom resolution that was set back to Auto, if any.
+        let resetHeight: Int?
+        let memoryLimitMB: Int
+    }
+    /// Lowers the settings when the previous launch failed. Returns what changed, or nil.
+    func recoverFromFailedBoot() -> BootRecovery? {
         #if targetEnvironment(simulator)
-        // Simulator runs are often stopped from Xcode; only phones need this.
-        bootPending = false
-        return nil
-        #else
+        // Simulator runs are often stopped from Xcode; only phones need this (unless testing it).
+        if !ProcessInfo.processInfo.arguments.contains("--simulate-failed-boot") { bootPending = false; return nil }
+        #endif
         guard bootPending else { return nil }
         bootPending = false
         let failed = graphicsPreset
-        let fallback = lastGoodPreset.flatMap { $0.rawValue < failed.rawValue ? $0 : nil }
+        // A preset that already ran stably on this phone is not the problem (the app was more likely
+        // closed by an update or by Xcode): keep it, and only undo a resolution raised above it.
+        let fallback = lastGoodPreset == failed ? failed
+            : lastGoodPreset.flatMap { $0.rawValue < failed.rawValue ? $0 : nil }
             ?? GraphicsPreset(rawValue: max(0, min(failed.rawValue - 1, tier.recommended.rawValue))) ?? .performance
-        guard fallback != failed else { return nil }
+        // A custom resolution above the fallback's own also costs memory: back to Auto (unless that
+        // resolution already ran stably with this preset).
+        let provenHeight = fallback == lastGoodPreset ? defaults.integer(forKey: "lastGoodRenderHeight") : 0
+        let resetHeight = renderHeight > max(fallback.height, provenHeight) ? renderHeight : nil
+        guard fallback != failed || resetHeight != nil else { return nil }
         graphicsPreset = fallback
-        return "The last launch on \(failed.title) did not finish, so graphics were lowered to \(fallback.title)."
-        #endif
+        if resetHeight != nil { renderHeight = 0 }
+        return BootRecovery(failed: failed, fallback: fallback, resetHeight: resetHeight, memoryLimitMB: tier.memoryLimitMB)
+    }
+    /// "Try again anyway" in the popup: put the settings back as they were.
+    func undoRecovery(_ recovery: BootRecovery) {
+        graphicsPreset = recovery.failed
+        if let height = recovery.resetHeight { renderHeight = height }
     }
     func markBootStarted() { bootPending = true }
     /// Leaving the app is not a crash.
     func markBootInterrupted() { bootPending = false }
-    func markBootStable() { bootPending = false; lastGoodPreset = graphicsPreset }
+    func markBootStable() {
+        bootPending = false
+        lastGoodPreset = graphicsPreset
+        defaults.set(renderHeight == 0 ? graphicsPreset.height : renderHeight, forKey: "lastGoodRenderHeight")
+    }
 }
