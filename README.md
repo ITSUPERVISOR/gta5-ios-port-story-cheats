@@ -4,6 +4,10 @@
 > **🆕 New in v1.2: build the app right from your iPhone, no computer needed.**
 > Open **[fivestarport.vercel.app](https://fivestarport.vercel.app)**, sign in with GitHub, pick three files, and about 25 minutes later your app is ready to install. Free.
 
+### Watch the 3-minute tutorial
+
+https://github.com/user-attachments/assets/1efff2dc-675e-473d-b988-0c23784404ed
+
 A fan project that runs the WebAssembly build of GTA V natively on iPhone: the engine compiled to ARM64, a native Metal renderer with every shader precompiled, Story mode or free-roam Sandbox, touch controls that act as a real controller (with the game's own aim assist), gyro aiming, tilt steering and graphics presets up to near-native resolution.
 
 **This repository contains no game files and no game code.** You need your own copy of the game files. The app is built from them in your own GitHub account (or on your own Mac), and it plays from your own copy on your phone.
