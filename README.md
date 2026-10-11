@@ -51,11 +51,13 @@ When it's done, tap **Download my app** to get `GTA5Port.ipa`. It also stays in 
 
 Open **SideStore** or **AltStore**, go to **My Apps**, tap **+** and pick `GTA5Port.ipa`. A free Apple ID re-signs the app every 7 days; SideStore does that on the phone, and AltStore does it over Wi-Fi from your computer.
 
-### 4. Point the app at your game files and play
+### 4. Give the app your game files and play
 
-1. Open **GTA V Port** and tap the **Game files** line.
-2. Choose **A folder on this iPhone** and pick your game folder (the one with `data/` and `b/` inside).
-3. Once the app has checked the folder, choose **Story mode** (the campaign, with saves) or **Sandbox** (free roam) and press **Play**.
+**Easiest:** open the app once, then in the Files app long-press your game folder, tap **Move**, and choose **On My iPhone › GTA V Port**. Moving within On My iPhone is instant. Open the app again: it finds the game by itself, at any depth (a `mirror/playgta5.com/…` folder works as is).
+
+**Or pick it:** in the app tap **Game files › Pick a folder on this iPhone** and tap **Open** while you are *in* the folder that has `data` and `b` inside (or any folder above it). Not inside `b` or `data`.
+
+Then choose **Story mode** (the campaign, with saves) or **Sandbox** (free roam) and press **Play**.
 
 Everything plays from your phone: no server, no internet needed while playing.
 

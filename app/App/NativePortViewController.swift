@@ -88,7 +88,7 @@ final class NativePortViewController: UIViewController, MTKViewDelegate, UIDocum
         title.font = .systemFont(ofSize: 34, weight: .bold)
         title.textColor = .white
         let subtitle = UILabel()
-        subtitle.text = "Fan project · runs your own game files from your own server"
+        subtitle.text = "Fan project · plays your own game files"
         subtitle.font = .preferredFont(forTextStyle: .subheadline)
         subtitle.textColor = .lightGray
         controllerLabel.text = "Controller: none connected"
@@ -207,6 +207,10 @@ final class NativePortViewController: UIViewController, MTKViewDelegate, UIDocum
         try? Data().write(to: logFile!)
         appendLog("Native UIKit + Metal host. Engine compiled into the app; no WebView or JIT.")
         appendLog("Metal device: \(device?.name ?? "unavailable")")
+        GameFolder.log = { [weak self] line in self?.appendLog(line) }
+        // A game folder moved into Files › On My iPhone › GTA V Port is found without any picking.
+        if GameFolder.findInAppFolder() { updateServerStatus() }
+        NotificationCenter.default.addObserver(self, selector: #selector(lookForGameFiles), name: UIApplication.didBecomeActiveNotification, object: nil)
         displayLink = CADisplayLink(target: self, selector: #selector(pollController))
         displayLink?.add(to: .main, forMode: .common)
         NotificationCenter.default.addObserver(self, selector: #selector(controllerChanged), name: .GCControllerDidDisconnect, object: nil)
@@ -342,6 +346,7 @@ final class NativePortViewController: UIViewController, MTKViewDelegate, UIDocum
         if GameFolder.isChosen {
             guard let data = GameFolder.open() else {
                 appendLog("The game folder on this iPhone can't be opened any more. Choose it again.")
+                showWhenFree(title: "Game files not found", message: "The game folder was moved or deleted. Put it back in Files › On My iPhone › GTA V Port, or pick it again.")
                 GameFolder.clear(); updateServerStatus(); launchButton.isEnabled = true; launchButton.setTitle("Play", for: .normal)
                 return
             }
@@ -440,12 +445,19 @@ final class NativePortViewController: UIViewController, MTKViewDelegate, UIDocum
 
     // MARK: Game file server
 
+    /// Back in the app (for example after moving the game folder in Files): look again.
+    @objc private func lookForGameFiles() {
+        guard !engineStarted, !GameFolder.isChosen || GameFolder.inAppFolder else { return }
+        GameFolder.findInAppFolder()
+        updateServerStatus()
+    }
     /// Shows the server and whether it answers; Play needs a working server.
     private func updateServerStatus(_ status: String? = nil) {
         let server = GameSettings.shared.assetServer
         let text: String
-        if GameFolder.isChosen { text = "Game files: \"\(GameFolder.name)\" on this iPhone ✓ (tap to change)" }
-        else if server.isEmpty { text = "Game files: not set. Tap to choose a folder on this iPhone or your computer." }
+        if GameFolder.inAppFolder { text = "Game files: \"\(GameFolder.name)\" in the GTA V Port folder ✓ (tap to change)" }
+        else if GameFolder.isChosen { text = "Game files: \"\(GameFolder.name)\" on this iPhone ✓ (tap to change)" }
+        else if server.isEmpty { text = "Game files: not set. Move your game folder into Files › On My iPhone › GTA V Port, or tap here." }
         else { text = "Game files: from \(server)\(status.map { " · " + $0 } ?? "")" }
         serverButton.setTitle(text, for: .normal)
         launchButton.isEnabled = (GameFolder.isChosen || !server.isEmpty) && !engineStarted
@@ -453,8 +465,9 @@ final class NativePortViewController: UIViewController, MTKViewDelegate, UIDocum
     /// Where the game files come from: a folder on this iPhone, or a server (your computer).
     private func askForGameFiles() {
         guard !engineStarted else { return }
-        let sheet = UIAlertController(title: "Where are your game files?", message: "A folder on this iPhone plays without a computer. Your computer works too, through Tailscale.", preferredStyle: .actionSheet)
-        sheet.addAction(UIAlertAction(title: "A folder on this iPhone", style: .default) { [weak self] _ in self?.pickGameFolder() })
+        let sheet = UIAlertController(title: "Where are your game files?", message: "Easiest: in the Files app, move your game folder into On My iPhone › GTA V Port. The app finds it there by itself.", preferredStyle: .actionSheet)
+        sheet.addAction(UIAlertAction(title: "I moved it into the GTA V Port folder", style: .default) { [weak self] _ in self?.checkAppFolder() })
+        sheet.addAction(UIAlertAction(title: "Pick a folder on this iPhone", style: .default) { [weak self] _ in self?.pickGameFolder() })
         sheet.addAction(UIAlertAction(title: "My computer (server address)", style: .default) { [weak self] _ in self?.askForAssetServer() })
         sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel))
         sheet.popoverPresentationController?.sourceView = serverButton
@@ -466,15 +479,36 @@ final class NativePortViewController: UIViewController, MTKViewDelegate, UIDocum
         picker.allowsMultipleSelection = false
         present(picker, animated: true)
     }
-    func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
-        guard let folder = urls.first else { return }
-        updateServerStatus("checking the folder…")
-        if let problem = GameFolder.choose(folder) {
-            let alert = UIAlertController(title: "That folder can't be used", message: problem, preferredStyle: .alert)
-            alert.addAction(UIAlertAction(title: "OK", style: .default))
-            present(alert, animated: true)
-        }
+    private func checkAppFolder() {
+        GameFolder.clear()
+        if GameFolder.findInAppFolder() { updateServerStatus(); return }
         updateServerStatus()
+        showWhenFree(title: "Game files not found", message: "There is no complete game folder in Files › On My iPhone › GTA V Port yet.\n\nOpen the Files app, find your game folder (the one with \"data\" and \"b\" inside), long-press it, tap Move, and choose On My iPhone › GTA V Port. If you got a .rar or .zip, unpack it first.")
+    }
+    func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+        guard let folder = urls.first else { appendLog("Folder picker returned nothing."); return }
+        serverButton.setTitle("Game files: checking the folder…", for: .normal)
+        DispatchQueue.global(qos: .userInitiated).async {
+            let problem = GameFolder.choose(folder)
+            DispatchQueue.main.async {
+                self.updateServerStatus()
+                guard let problem else { return }
+                self.appendLog("Game folder refused: " + problem)
+                self.showWhenFree(title: "That folder can't be used", message: problem)
+            }
+        }
+    }
+    func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) { appendLog("Folder picker cancelled.") }
+    /// Shows a message once nothing else (like the closing folder picker) is on screen; iOS drops
+    /// alerts presented during another presentation.
+    private func showWhenFree(title: String, message: String, attempt: Int = 0) {
+        if (presentedViewController != nil || transitionCoordinator != nil) && attempt < 20 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { self.showWhenFree(title: title, message: message, attempt: attempt + 1) }
+            return
+        }
+        let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "OK", style: .default))
+        present(alert, animated: true)
     }
     private func askForAssetServer() {
         let alert = UIAlertController(title: "Game file server", message: "The address of the computer that serves your own copy of the game files, for example https://my-pc.tailnet-name.ts.net", preferredStyle: .alert)
