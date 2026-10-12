@@ -40,7 +40,7 @@ final class ControlsLayoutEditorController: UIViewController {
     private let controls = TouchControlsView(frame: .zero)
     private let background = UIImageView()
     private let toolbar = UIStackView()
-    private let groupPicker = UISegmentedControl(items: ["On foot", "In a vehicle"])
+    private let groupPicker = UISegmentedControl(items: ["On foot", "In a vehicle", "Aircraft"])
     private let sizeSlider = UISlider()
     private let hideButton = UIButton(type: .system)
     private let hint = UILabel()
@@ -128,7 +128,8 @@ final class ControlsLayoutEditorController: UIViewController {
     private var group: String { groupPicker.selectedSegmentIndex == 0 ? "foot" : "vehicle" }
 
     private func showGroup() {
-        controls.updateContext(vehicle: group == "foot" ? 0 : 1, pauseMenu: false)
+        // Aircraft share the vehicle layout, but show their own buttons (plane: vehicle type 1 + 1).
+        controls.updateContext(vehicle: [0, 1, 2][max(0, groupPicker.selectedSegmentIndex)], pauseMenu: false)
         selected = nil
         controls.updateVisibility()
         controls.setNeedsLayout()

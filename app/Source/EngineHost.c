@@ -243,7 +243,7 @@ void w2c_env_wasm_input_publish_js(struct w2c_env *host, u64 block) {
   // loading screen. Benchmarks always use the release (story) startup.
   int startMode=benchmarkEnabled()?1:configuredStartMode;
   atomic_store((_Atomic int32_t *)(base + 440), startMode);
-  pg_log(startMode==1?"Start mode: Story Mode (continues the newest save, or a new game from the Prologue).":"Start mode: Sandbox Mode on the GTA V map.");
+  pg_log(startMode==1?"Start mode: Story Mode (continues the newest save, or a new game from the Prologue).":startMode==3?"Start mode: Sandbox Mode on the test level (env_test).":"Start mode: Sandbox Mode on the GTA V map.");
   atomic_store(&inputBlock, block);
   pg_log("Native controller bridge attached to the game's input block.");
 }
@@ -277,6 +277,159 @@ uint32_t PGGameStatus(void){
  if(pg_context_u64(m,size,19339168,&cutscene)&&cutscene&&cutscene<size-3216&&PG_BYTE(cutscene+3215))bits|=4;
  #undef PG_BYTE
  return bits;
+}
+// Touch control hints, from the pinned engine's memory (layouts traced in the disassembly of the
+// pinned game.wasm). Every read is bounds-checked, so a torn or stale value can
+// at worst show or hide a button for a frame.
+static bool pg_context_u8(const uint8_t *m,uint64_t size,uint64_t address,uint8_t *value){
+ if(!m||address>=size)return false;
+ *value=atomic_load_explicit((const _Atomic uint8_t *)(m+address),memory_order_relaxed);return true;
+}
+static bool pg_context_f32(const uint8_t *m,uint64_t size,uint64_t address,float *value){
+ uint32_t bits;if(!pg_context_u32(m,size,address,&bits))return false;memcpy(value,&bits,4);return true;
+}
+static bool pg_context_u16(const uint8_t *m,uint64_t size,uint64_t address,uint16_t *value){
+ if(!m||size<2||address>size-2||(address&1))return false;
+ *value=atomic_load_explicit((const _Atomic uint16_t *)(m+address),memory_order_relaxed);return true;
+}
+// CProjectileManager::CanExplodeTriggeredProjectiles (f82725): a sticky bomb of the player's that
+// can be set off: up to 50 projectiles, each with owner, weapon hash and an armed flag.
+static bool pg_can_detonate(const uint8_t *m,uint64_t size,uint64_t ped){
+ uint32_t count;uint64_t table;uint16_t infos;
+ if(!pg_context_u32(m,size,28498240,&count)||!pg_context_u64(m,size,28496576,&table)||!pg_context_u16(m,size,28496584,&infos)||!table)return false;
+ if(count>50)count=50;
+ for(uint32_t i=0;i<count;i++){
+  uint64_t p,owner;uint32_t hash;uint8_t armed;
+  if(!pg_context_u64(m,size,28497840+8ull*i,&p)||!p)continue;
+  if(!pg_context_u64(m,size,p+1320,&owner)||owner!=ped)continue;
+  if(!pg_context_u32(m,size,p+1312,&hash)||!hash)continue;
+  // Binary search of the weapon infos by hash (key at +16).
+  int lo=0,hi=(int)infos-1;uint64_t info=0;
+  for(int steps=0;lo<=hi&&steps<20;steps++){
+   int mid=(lo+hi)/2;uint64_t candidate;uint32_t key;
+   if(!pg_context_u64(m,size,table+8ull*mid,&candidate)||!candidate||!pg_context_u32(m,size,candidate+16,&key))break;
+   if(key==hash){info=candidate;break;}
+   if(key<hash)lo=mid+1;else hi=mid-1;
+  }
+  uint8_t flags;
+  if(info&&pg_context_u8(m,size,info+2255,&flags)&&(flags&4)&&pg_context_u8(m,size,p+1538,&armed)&&armed)return true;
+ }
+ return false;
+}
+PGControlHints PGReadControlHints(uint32_t touchContext){
+ PGControlHints hints={0};
+ if(!atomic_load(&inputBlock))return hints;
+ const uint8_t *m=(const uint8_t *)(void *)env.memory.data;uint64_t size=env.memory.size;
+ uint64_t info,ped;
+ if(!pg_context_u64(m,size,20159720,&info)||!info||!pg_context_u64(m,size,info+8,&ped)||!ped)return hints;
+ // Special ability (f46103, f41591, f41600, f41588): the ped's active ability slot.
+ uint32_t slot;uint64_t ability,data,modelInfo;
+ if(getenv("PG_DEBUG_HINTS")){
+  static double lastChain;
+  if(timeMS(CLOCK_MONOTONIC)-lastChain>10000){
+   lastChain=timeMS(CLOCK_MONOTONIC);uint32_t rawSlot=99;uint64_t a0=0,a1=0;
+   pg_context_u32(m,size,ped+5088,&rawSlot);pg_context_u64(m,size,ped+5072,&a0);pg_context_u64(m,size,ped+5080,&a1);
+   char line[160];snprintf(line,sizeof line,"Hints debug: ped 0x%llx slot %u abilities 0x%llx 0x%llx",(unsigned long long)ped,rawSlot,(unsigned long long)a0,(unsigned long long)a1);pg_log(line);
+  }
+ }
+ if(pg_context_u32(m,size,ped+5088,&slot)&&slot<2&&pg_context_u64(m,size,ped+5072+8ull*slot,&ability)&&ability&&
+    pg_context_u64(m,size,ability,&data)&&data&&pg_context_u64(m,size,ped+32,&modelInfo)&&modelInfo){
+  uint8_t enabled=0,active=0,unlocked=0;float current=0,maximum=0;uint32_t minimum=0,kind=0,model=0,michael=0,franklin=0,trevor=0;
+  pg_context_u8(m,size,ability+106,&enabled);pg_context_u8(m,size,ability+107,&active);
+  pg_context_f32(m,size,ability+52,&current);pg_context_f32(m,size,ability+60,&maximum);
+  pg_context_u32(m,size,data+8,&minimum);pg_context_u32(m,size,data+60,&kind);
+  pg_context_u32(m,size,modelInfo+24,&model);
+  pg_context_u32(m,size,19625424,&michael);pg_context_u32(m,size,19625440,&franklin);pg_context_u32(m,size,19625456,&trevor);
+  if(model&&model==michael)pg_context_u8(m,size,20197688,&unlocked);
+  else if(model&&model==franklin)pg_context_u8(m,size,20197689,&unlocked);
+  else if(model&&model==trevor)pg_context_u8(m,size,20197690,&unlocked);
+  // kind -1: never; 0: only driving a car, quad or bike (Franklin); 1+: anywhere.
+  bool driving=touchContext!=0&&touchContext!=2&&touchContext!=9&&touchContext!=10&&touchContext!=11&&touchContext!=13&&touchContext!=14&&touchContext!=16;
+  bool usableHere=(int32_t)kind>=1||((int32_t)kind==0&&driving);
+  // Debug (PG_DEBUG_HINTS=1): the raw values every 10 s, to check the layout on a new build.
+  static double lastDebug;
+  if(getenv("PG_DEBUG_HINTS")&&timeMS(CLOCK_MONOTONIC)-lastDebug>10000){
+   lastDebug=timeMS(CLOCK_MONOTONIC);char line[240];
+   snprintf(line,sizeof line,"Hints debug: slot %u ability 0x%llx enabled %u active %u kind %d min %u cur %.2f max %.2f model 0x%x michael 0x%x franklin 0x%x trevor 0x%x unlocked %u",
+    slot,(unsigned long long)ability,enabled,active,(int32_t)kind,minimum,current,maximum,model,michael,franklin,trevor,unlocked);pg_log(line);
+  }
+  if((enabled&1)&&unlocked&&(int32_t)kind!=-1&&usableHere){
+   hints.specialShown=true;
+   hints.specialActive=active&1;
+   hints.specialFill=maximum>0?fminf(1,fmaxf(0,current/maximum)):0;
+   hints.specialReady=!hints.specialActive&&current>0&&floorf(current)>=3&&lroundf(current)>=(long)(int32_t)minimum;
+  }
+ }
+ hints.canDetonate=pg_can_detonate(m,size,ped);
+ // Help messages (CMessages, 3 slots of 600 bytes; "is help showing" is the first byte).
+ uint8_t first=0;
+ if(pg_context_u8(m,size,25477136,&first)&&first&&size>25477136+1800){
+  hints.helpShown=true;
+  const char *text=(const char *)(m+25477136);
+  static const char *const tokens[]={"INPUT_CONTEXT","INPUT_TALK"};
+  for(int t=0;t<2&&!hints.helpContext;t++)if(memmem(text,1800,tokens[t],strlen(tokens[t])))hints.helpContext=true;
+  // Logged once per new message, so the prompts' button tokens can be checked in logs.
+  static char last[96];char now[96];size_t n=strnlen(text,95);memcpy(now,text,n);now[n]=0;
+  if(strcmp(now,last)){memcpy(last,now,sizeof last);char line[160];snprintf(line,sizeof line,"Help message: %s",now);pg_log(line);}
+ }
+ uint32_t wheel=0;
+ if(pg_context_u32(m,size,19480044,&wheel))hints.radioWheelOpen=wheel&1;
+ return hints;
+}
+// The radio wheel reads INPUT_RADIO_WHEEL_UD/LR (332/333) from the main frontend control
+// (CRadioWheel::GetInputAxis f35894 -> CControlMgr::GetMainFrontendControl f65461: 24660320, or
+// 24488864 once a session runs), and neither has a controller binding here, so their value stays 0.
+// An ioValue's value is float[0] * float[1] (ioValue::GetUnboundNorm f10519); [1] is written.
+void PGSetRadioWheelDirection(float x, float y, bool active) {
+  static bool wasActive;
+  if (!active && !wasActive) return;
+  wasActive = active;
+  if (!atomic_load(&inputBlock)) return;
+  const uint64_t controls[] = {24660320, 24488864};
+  const float values[] = {active ? -y : 0, active ? x : 0}; // UD: up is negative, as on the pad
+  for (int c = 0; c < 2; c++) for (int a = 0; a < 2; a++) {
+    uint64_t at = controls[c] + 33704 + 72ull * (332 + a);
+    float *value = pg_pointer(&env, at + 4, 4);
+    *value = fmaxf(-1, fminf(1, values[a]));
+  }
+}
+// Keyboard and mouse. The input block holds 256 key bytes (0x80 = down) followed by int32 words:
+// 0 x, 1 y, 2 dx, 3 dy, 4 wheel, 5 buttons, 6 focus, 7 locked; 44/45 hold the back-buffer size.
+static _Atomic uint8_t *pg_input_keys(void) {
+  uint64_t block = atomic_load(&inputBlock);
+  return block ? pg_pointer(&env, block, 444) : NULL;
+}
+void PGSetKey(uint8_t virtualKey, bool down) {
+  _Atomic uint8_t *keys = pg_input_keys();
+  if (keys) atomic_store(keys + virtualKey, down ? 0x80 : 0);
+}
+void PGReleaseAllKeys(void) {
+  _Atomic uint8_t *keys = pg_input_keys();
+  if (keys) for (int i = 0; i < 256; i++) atomic_store(keys + i, 0);
+}
+void PGMouseInput(int32_t dx, int32_t dy, int32_t buttons) {
+  _Atomic uint8_t *keys = pg_input_keys();
+  if (!keys) return;
+  _Atomic int32_t *words = (_Atomic int32_t *)((uint8_t *)(void *)keys + 256);
+  int32_t width = atomic_load(words + 44), height = atomic_load(words + 45);
+  if (width < 320 || height < 180) { width = 960; height = 540; }
+  int32_t x = atomic_load(words) + dx, y = atomic_load(words + 1) + dy;
+  atomic_store(words, x < 0 ? 0 : x > width - 1 ? width - 1 : x);
+  atomic_store(words + 1, y < 0 ? 0 : y > height - 1 ? height - 1 : y);
+  if (dx) atomic_fetch_add(words + 2, dx);
+  if (dy) atomic_fetch_add(words + 3, dy);
+  atomic_store(words + 5, buttons);
+}
+void PGMouseWheel(int32_t notches) {
+  _Atomic uint8_t *keys = pg_input_keys();
+  if (keys && notches) atomic_fetch_add((_Atomic int32_t *)((uint8_t *)(void *)keys + 256) + 4, notches);
+}
+void PGSetMouseFocus(bool focused, bool locked) {
+  _Atomic uint8_t *keys = pg_input_keys();
+  if (!keys) return;
+  _Atomic int32_t *words = (_Atomic int32_t *)((uint8_t *)(void *)keys + 256);
+  atomic_store(words + 6, focused ? 1 : 0);
+  atomic_store(words + 7, locked ? 1 : 0);
 }
 // Debug: copies [address, address+length) of engine memory (for finding state flags).
 bool PGDebugReadMemory(uint64_t address,void *out,uint64_t length){
@@ -362,6 +515,7 @@ void PGUpdateVirtualPad(PGPadState state) {
 // control-update thread.
 void w2c_game_f36170(w2c_game*, u32, u32);
 void w2c_game_f36175(w2c_game*, u64, u32, u32);
+void w2c_game_f135(w2c_game*, u32); // rage::sysIpcSleep
 static _Atomic int32_t pendingTargetingMode = -1;
 void PGSetTargetingMode(int32_t mode) { if (mode >= 0 && mode <= 3) atomic_store(&pendingTargetingMode, mode); }
 // `instance` is the calling engine thread's own (its wasm stack pointer).
@@ -373,8 +527,55 @@ static void pg_apply_targeting_mode(w2c_game *instance) {
   if (listeners) w2c_game_f36175(instance, listeners, 0, (u32)mode);
   char line[96]; snprintf(line, sizeof line, "Targeting mode set to %d.", mode); pg_log(line);
 }
+#if TARGET_OS_SIMULATOR
+u64 w2c_game_f100(w2c_game*, u64); // operator new
+u32 w2c_game_f81498(w2c_game*, u64, u64); // CMovieMgr::PreloadMovie
+void w2c_game_f81499(w2c_game*, u32); // CMovieMgr::Play
+u32 w2c_game_f58715(w2c_game*); // player_commands::CommandPlayerPedId
+void w2c_game_f50133(w2c_game*, u32, u64, u32, u32, u32); // entity_commands::CommandSetEntityCoordsNoOffset
+// Test (PG_TEST_TELEPORT="x,y,z"): about 30 s in, moves the player there (a script vector is 3
+// floats 8 bytes apart).
+static void pg_test_teleport(w2c_game *instance) {
+  static int frames;
+  const char *target = getenv("PG_TEST_TELEPORT");
+  float x, y, z;
+  if (frames < 0 || !target || ++frames < 900 || sscanf(target, "%f,%f,%f", &x, &y, &z) != 3) return;
+  frames = -1;
+  uint64_t vector = w2c_game_f100(instance, 32);
+  float *v = pg_pointer(&env, vector, 24); v[0] = x; v[2] = y; v[4] = z;
+  w2c_game_f50133(instance, w2c_game_f58715(instance), vector, 0, 0, 0);
+  char line[96]; snprintf(line, sizeof line, "TEST: player moved to %.1f, %.1f, %.1f.", x, y, z); pg_log(line);
+}
+void w2c_game_f50825(w2c_game*, u32); // graphics_commands::CommandSetTVChannel
+// Test (PG_TEST_TV=1): from about 45 s in, switches the TV on as a script does (SET_TV_CHANNEL),
+// then to the next channel every 30 s, so new shows load without waiting for the playlist.
+static void pg_test_tv(w2c_game *instance) {
+  static int frames;
+  if (!getenv("PG_TEST_TV") || ++frames < 1350 || (frames - 1350) % 900) return;
+  int channel = (frames - 1350) / 900 % 3;
+  char line[64]; snprintf(line, sizeof line, "TEST: TV on channel %d.", channel); pg_log(line);
+  w2c_game_f50825(instance, (u32)channel);
+}
+// Test (PG_TEST_VIDEO=1): about a minute in, loads and plays a video that doesn't exist, the way a
+// TV switching on does, and logs how long the engine was held up.
+static void pg_test_video(w2c_game *instance) {
+  static int frames;
+  if (frames < 0 || !getenv("PG_TEST_VIDEO") || ++frames < 1800) return;
+  frames = -1;
+  uint64_t name = w2c_game_f100(instance, 32);
+  memcpy(pg_pointer(&env, name, 32), "pg_test_video", 14);
+  pg_log("TEST: loading a video that doesn't exist.");
+  double start = timeMS(CLOCK_MONOTONIC);
+  uint32_t handle = w2c_game_f81498(instance, 28366608, name);
+  w2c_game_f81499(instance, handle);
+  char line[120]; snprintf(line, sizeof line, "TEST: video handle %u, the engine was held up %.0f ms.", handle, timeMS(CLOCK_MONOTONIC) - start); pg_log(line);
+}
+#endif
 void pg_virtual_pad_apply(w2c_game *instance, uint64_t pad) {
   if (pad == 12840656) pg_apply_targeting_mode(instance);
+#if TARGET_OS_SIMULATOR
+  if (pad == 12840656) { pg_test_teleport(instance); pg_test_tv(instance); pg_test_video(instance); }
+#endif
   if (pad != 12840656 || !atomic_load(&virtualPadActive)) return;
   uint64_t packed = atomic_load(&virtualPad);
   uint8_t *base = pg_pointer(&env, pad, 136);
@@ -387,6 +588,29 @@ void pg_virtual_pad_apply(w2c_game *instance, uint64_t pad) {
   for (int i = 0; i < 4; i++) atomic_store((_Atomic uint8_t *)(base + 20 + i), (uint8_t)(packed >> (16 + 8 * i)));
   atomic_store((_Atomic uint8_t *)(base + 24), l2);
   atomic_store((_Atomic uint8_t *)(base + 25), r2);
+}
+// Videos on TVs and in some cutscenes: the engine waits for one to load with no time limit
+// (Scripts/prepare_movie_wait.py). The game files have no .bik videos, and a load that never
+// answered froze the game whenever a TV came on. After 2 s the video is marked as failed, as
+// CMovie::LoadedAsyncCb does itself (bit 32 of the flags at +96), and later videos fail at once.
+static _Atomic int videosUnavailable;
+void pg_movie_wait(w2c_game *instance, uint64_t movie) {
+  static _Thread_local uint64_t waitingFor;
+  static _Thread_local double since, last;
+  double now = timeMS(CLOCK_MONOTONIC);
+  if (waitingFor != movie || now - last > 100) { waitingFor = movie; since = now; }
+  last = now;
+  bool limit = true;
+#if TARGET_OS_SIMULATOR
+  limit = !getenv("PG_TEST_VIDEO_NO_LIMIT"); // reproduces the old behaviour
+#endif
+  if (limit && (atomic_load(&videosUnavailable) || now - since > 2000)) {
+    atomic_fetch_or((_Atomic uint32_t *)pg_pointer(&env, movie + 96, 4), 32);
+    if (!atomic_exchange(&videosUnavailable, 1)) pg_log("A video (TV or cutscene) did not load within 2 s; videos are skipped from now on.");
+    waitingFor = 0;
+    return;
+  }
+  w2c_game_f135(instance, 1);
 }
 // The core of IS_PAUSE_MENU_ACTIVE (f52482 -> f36254): either frontend flag.
 bool PGPauseMenuActive(void) {
@@ -435,7 +659,8 @@ void PGConfigureEngine(const char *const *quality,unsigned count,int width,int h
 }
 void PGSetStartMode(int32_t mode){
   if(atomic_load(&started))return;
-  if(mode==1||mode==2)configuredStartMode=mode;
+  // 1 Story, 2 Sandbox on the GTA V map, 3 Sandbox on the game's test level (env_test).
+  if(mode>=1&&mode<=3)configuredStartMode=mode;
 }
 void PGSetBackBufferSize(int width,int height){
   uint64_t block=atomic_load(&inputBlock);

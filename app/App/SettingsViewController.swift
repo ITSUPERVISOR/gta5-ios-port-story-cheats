@@ -36,7 +36,10 @@ final class SettingsViewController: UITableViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         navigationItem.rightBarButtonItem = UIBarButtonItem(systemItem: .done, primaryAction: UIAction { [weak self] _ in self?.dismiss(animated: true) })
+        navigationItem.rightBarButtonItem?.tintColor = Theme.accent
         tableView.register(UITableViewCell.self, forCellReuseIdentifier: "cell")
+        tableView.backgroundView = Theme.dimmedBackdrop(image: "SettingsBackground")
+        tableView.separatorColor = UIColor(white: 1, alpha: 0.1)
         fileRows = makeFileRows()
         NotificationCenter.default.addObserver(self, selector: #selector(preloadChanged), name: .assetPreloadChanged, object: nil)
         preloader.refresh()
@@ -52,11 +55,31 @@ final class SettingsViewController: UITableViewController {
 
     override func numberOfSections(in tableView: UITableView) -> Int { Section.allCases.count }
 
+    // The app's look: rows as glass on the darkened art, headers in the display font.
+    override func tableView(_ tableView: UITableView, willDisplay cell: UITableViewCell, forRowAt indexPath: IndexPath) {
+        cell.backgroundColor = Theme.rowBackground
+        let selected = UIView()
+        selected.backgroundColor = Theme.rowSelected
+        cell.selectedBackgroundView = selected
+    }
+    override func tableView(_ tableView: UITableView, willDisplayHeaderView view: UIView, forSection section: Int) {
+        guard let header = view as? UITableViewHeaderFooterView else { return }
+        var content = header.defaultContentConfiguration()
+        content.text = self.tableView(tableView, titleForHeaderInSection: section)
+        content.textProperties.font = Theme.display(15, .bold)
+        content.textProperties.color = Theme.text
+        content.textProperties.transform = .uppercase
+        header.contentConfiguration = content
+    }
+    override func tableView(_ tableView: UITableView, willDisplayFooterView view: UIView, forSection section: Int) {
+        (view as? UITableViewHeaderFooterView)?.textLabel?.textColor = Theme.tertiaryText
+    }
+
     override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
         switch Section(rawValue: section)! {
-        case .mode: return GameMode.allCases.count
+        case .mode: return GameMode.allCases.count + (settings.gameModeChoice == .sandbox ? 1 : 0)
         case .graphics: return settings.tier.allowed.count + 3
-        case .controls: return 8
+        case .controls: return 10
         case .gyro: return (settings.gyroAim == .off ? 1 : 3) + (settings.tiltSteer == .off ? 1 : 2)
         case .files: return fileRows.count
         case .device: return 3
@@ -98,6 +121,23 @@ final class SettingsViewController: UITableViewController {
         content.secondaryTextProperties.color = .secondaryLabel
         let presets = settings.tier.allowed
         switch Section(rawValue: indexPath.section)! {
+        case .mode where indexPath.row == GameMode.allCases.count:
+            // Sandbox only: which map.
+            content.text = "Sandbox map"
+            content.secondaryText = settings.sandboxMap == 1 ? "The test level that comes with the game files" : "The full GTA V map"
+            let button = UIButton(configuration: .gray())
+            button.configuration?.title = GameSettings.sandboxMapTitles[settings.sandboxMap]
+            button.menu = UIMenu(children: GameSettings.sandboxMapTitles.enumerated().map { index, title in
+                UIAction(title: title, state: index == settings.sandboxMap ? .on : .off) { [weak self] _ in
+                    self?.settings.sandboxMap = index
+                    self?.gameModeChanged?()
+                    UIView.performWithoutAnimation { self?.tableView.reloadSections([Section.mode.rawValue], with: .none) }
+                }
+            })
+            button.showsMenuAsPrimaryAction = true
+            button.sizeToFit()
+            cell.accessoryView = button
+            cell.selectionStyle = .none
         case .mode:
             let mode = GameMode.allCases[indexPath.row]
             content.text = mode.title + (mode == runningMode ? " (playing now)" : "")
@@ -180,7 +220,7 @@ final class SettingsViewController: UITableViewController {
                     UIAction(title: title, state: index == settings.targetingMode ? .on : .off) { [weak self] _ in
                         self?.settings.targetingMode = index
                         self?.targetingChanged?()
-                        self?.tableView.reloadSections([Section.controls.rawValue], with: .none)
+                        UIView.performWithoutAnimation { self?.tableView.reloadSections([Section.controls.rawValue], with: .none) }
                     }
                 })
                 button.showsMenuAsPrimaryAction = true
@@ -190,6 +230,13 @@ final class SettingsViewController: UITableViewController {
                 content.text = "Hide when a controller is connected"
                 content.secondaryText = "Touch controls come back as soon as the controller disconnects"
                 cell.accessoryView = toggle(settings.hideTouchWithController, label: "Hide touch controls with a controller") { [weak self] in self?.settings.hideTouchWithController = $0 }
+            case 8:
+                content.text = "Keyboard and mouse"
+                content.secondaryText = "Play with the PC controls (WASD, mouse look). With both connected, touch controls hide"
+                cell.accessoryView = toggle(settings.keyboardMouse, label: "Keyboard and mouse") { [weak self] in
+                    self?.settings.keyboardMouse = $0
+                    if !$0 { KeyboardMouse.shared.releaseAll() }
+                }
             default:
                 content.text = "Fire also aims"
                 content.secondaryText = "Fire locks on first, like the classic mobile GTA games"
@@ -203,7 +250,7 @@ final class SettingsViewController: UITableViewController {
                 button.configuration?.title = settings.tiltSteer.title
                 button.menu = UIMenu(children: TiltSteerMode.allCases.map { mode in
                     UIAction(title: mode.title, state: mode == settings.tiltSteer ? .on : .off) { [weak self] _ in
-                        self?.settings.tiltSteer = mode; self?.tableView.reloadSections([Section.gyro.rawValue], with: .automatic)
+                        self?.settings.tiltSteer = mode; UIView.performWithoutAnimation { self?.tableView.reloadSections([Section.gyro.rawValue], with: .none) }
                     }
                 })
                 button.showsMenuAsPrimaryAction = true
@@ -219,7 +266,7 @@ final class SettingsViewController: UITableViewController {
                 content.secondaryText = settings.gyroAim.title
                 let menu = UIMenu(children: GyroAimMode.allCases.map { mode in
                     UIAction(title: mode.title, state: mode == settings.gyroAim ? .on : .off) { [weak self] _ in
-                        self?.settings.gyroAim = mode; self?.tableView.reloadSections([Section.gyro.rawValue], with: .automatic)
+                        self?.settings.gyroAim = mode; UIView.performWithoutAnimation { self?.tableView.reloadSections([Section.gyro.rawValue], with: .none) }
                     }
                 })
                 let button = UIButton(configuration: .gray())
@@ -278,9 +325,10 @@ final class SettingsViewController: UITableViewController {
         if indexPath.section == Section.device.rawValue, indexPath.row == 2 { shareLogs(from: tableView.cellForRow(at: indexPath)); return }
         if indexPath.section == Section.controls.rawValue, indexPath.row == 7 { editLayout?(); return }
         if indexPath.section == Section.mode.rawValue {
+            guard indexPath.row < GameMode.allCases.count else { return }
             settings.gameMode = GameMode.allCases[indexPath.row]
             gameModeChanged?()
-            tableView.reloadSections([Section.mode.rawValue], with: .none)
+            UIView.performWithoutAnimation { tableView.reloadSections([Section.mode.rawValue], with: .none) }
             return
         }
         if indexPath.section == Section.files.rawValue { selectFileRow(fileRows[indexPath.row]); return }
@@ -288,7 +336,7 @@ final class SettingsViewController: UITableViewController {
         guard indexPath.section == Section.graphics.rawValue, indexPath.row < presets.count else { return }
         settings.graphicsPreset = presets[indexPath.row]
         resolutionChanged?()
-        tableView.reloadSections([Section.graphics.rawValue], with: .none)
+        UIView.performWithoutAnimation { tableView.reloadSections([Section.graphics.rawValue], with: .none) }
     }
 
     // MARK: Game files
@@ -350,7 +398,7 @@ final class SettingsViewController: UITableViewController {
                 content.text = "All files on device"
                 content.secondaryText = "\(total) · plays without streaming"
                 content.image = UIImage(systemName: "checkmark.circle.fill")
-                content.imageProperties.tintColor = .systemGreen
+                content.imageProperties.tintColor = Theme.ok
             case .downloading:
                 content.text = "Downloading game files"
                 content.secondaryText = progressText()

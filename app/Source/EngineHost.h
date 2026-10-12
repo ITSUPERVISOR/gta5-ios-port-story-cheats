@@ -22,7 +22,7 @@ void PGConfigureEngine(const char *const *quality, unsigned count, int width, in
 // Before PGStartEngine: 1 Story Mode (the release startup: continues the
 // newest save in /userdata/Documents, else a new game from the Prologue),
 // 2 Sandbox Mode (free roam on the GTA V map; its files go to
-// /sandbox/Documents). Default 2.
+// /sandbox/Documents), 3 Sandbox Mode on the test level (env_test). Default 2.
 void PGSetStartMode(int32_t mode);
 // Live back-buffer resize after the engine has started.
 void PGSetBackBufferSize(int width, int height);
@@ -38,6 +38,30 @@ void PGUpdateController(PGControllerState state, double elapsedSeconds);
 uint32_t PGCurrentTouchContext(void);
 // Game state for the touch layout: 1 control off, 2 phone out, 4 cutscene, 8 warning screen, 16 no player.
 uint32_t PGGameStatus(void);
+// What the touch controls need to know to show a button only when it applies (all memory reads).
+typedef struct {
+  bool specialShown;   // the character has a usable special ability here
+  bool specialReady;   // charged enough to start
+  bool specialActive;  // running now
+  float specialFill;   // meter, 0...1
+  bool canDetonate;    // the player has sticky bombs placed
+  bool helpShown;      // a help message is on screen
+  bool helpContext;    // ...and it asks for the context input (D-pad right)
+  bool radioWheelOpen; // the radio wheel is up
+} PGControlHints;
+PGControlHints PGReadControlHints(uint32_t touchContext);
+// Keyboard and mouse, through the game's own PC input (the block the browser build wrote): key
+// state bytes indexed by Windows virtual-key code, and mouse words after them.
+void PGSetKey(uint8_t virtualKey, bool down);
+// The radio wheel's direction (stick-style, up positive). Its two inputs have no controller binding
+// in this build, so the value is written into them directly while the wheel is held.
+void PGSetRadioWheelDirection(float x, float y, bool active);
+void PGReleaseAllKeys(void);
+// Mouse movement in pixels since the last call, buttons (bit 0 left, 1 right, 2 middle).
+void PGMouseInput(int32_t dx, int32_t dy, int32_t buttons);
+void PGMouseWheel(int32_t notches);
+// The window has focus / the pointer is captured for looking around.
+void PGSetMouseFocus(bool focused, bool locked);
 bool PGDebugReadMemory(uint64_t address, void *out, uint64_t length);
 // Virtual controller fed into the engine's own pad 0 (see
 // Scripts/prepare_virtual_pad.py). Buttons use the engine's pad bits:
