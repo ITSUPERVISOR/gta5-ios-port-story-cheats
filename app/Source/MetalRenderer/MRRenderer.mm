@@ -19,6 +19,8 @@
 #include <functional>
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdarg>
 
 namespace mr {
 
@@ -192,6 +194,10 @@ struct Renderer {
 	id<MTLRenderPipelineState> blitPipe, capturePipe;
 	id<MTLDepthStencilState> noDepth;
 
+	// game shader objects by program (the first object created for each), for program substitutions
+	std::unordered_map<ShaderInfo *, uint32_t> shaderObjects;
+	bool lastMaskSwap = false;
+
 	// statistics
 	uint64_t commitReasons[4] = {}, skipReasons[8] = {};
 	uint64_t draws = 0, skipped = 0, pendingSkips = 0, clamped = 0, presents = 0, commits = 0;
@@ -208,6 +214,23 @@ struct Renderer {
 };
 
 static Renderer *R;
+
+// ---- debug trace (simulator only, env PG_MR_TRACE=<seconds after the world is shown>) ---------------------------------
+// Writes every command of one frame (draws with their shaders, targets, states and textures; clears, copies) to
+// Documents/mr-trace.txt and saves the render targets the frame drew into as PNGs (NativeFrames/trace-rt<id>).
+#if TARGET_OS_SIMULATOR
+#define MR_TRACE 1
+static struct { int state = 0; double at = -1; FILE *f = nullptr; uint64_t n = 0; std::vector<uint32_t> rts; id<MTLRenderPipelineState> alphaPipe, dsPipe; int snaps = 0; } T;
+static void tracef(const char *format, ...) __attribute__((format(printf, 1, 2)));
+static void tracef(const char *format, ...) {
+	if (T.state != 2 || !T.f) return;
+	va_list a; va_start(a, format); vfprintf(T.f, format, a); va_end(a);
+	fputc('\n', T.f);
+}
+#else
+#define MR_TRACE 0
+static inline void tracef(const char *, ...) {}
+#endif
 
 // ---- command buffers and encoders -----------------------------------------------------------------------------------
 static id<MTLCommandBuffer> commandBuffer() {
@@ -410,6 +433,9 @@ static void createTexture(const uint32_t *p) {
 		desc.swizzle = MTLTextureSwizzleChannelsMake(MTLTextureSwizzleZero, MTLTextureSwizzleZero, MTLTextureSwizzleZero, MTLTextureSwizzleRed);
 	else if (m.a8) { t->alphaView = true; desc.usage |= MTLTextureUsagePixelFormatView; }
 	t->tex = [R->device newTextureWithDescriptor:desc];
+#if MR_TRACE
+	if (m.a8 && (bind & (BIND_RT | BIND_UAV))) logOnce("a8rt" + std::to_string(w) + "x" + std::to_string(h), "Metal renderer [trace]: A8 render target %u %ux%u bind %#x", id, w, h, bind);
+#endif
 	if (!t->tex) logOnce("tex" + std::to_string(dxgi) + "x" + std::to_string(bind), "Metal renderer: texture %ux%u dxgi %u bind %#x could not be created", w, h, dxgi, bind);
 	R->objs.set(id, t);
 }
@@ -789,6 +815,10 @@ static Pipe *getPipeline(Shader *vs, Shader *ps, Layout *lay) {
 	pipe->label = vsi->label + " + " + (psi ? psi->label : "-");
 	id<MTLFunction> vfn = shaderFunction(vsi), pfn = psi ? shaderFunction(psi) : nil;
 	if (!vfn || (psi && !pfn)) { pipe->failed = true; return pipe; }
+	if (psi) for (uint32_t loc : psi->inputs) if (std::find(vsi->outputs.begin(), vsi->outputs.end(), loc) == vsi->outputs.end()) {
+		logOnce("varying" + pipe->label, "Metal renderer: %s reads varying %u that the vertex shader does not write", pipe->label.c_str(), loc);
+		break;
+	}
 	MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
 	d.vertexFunction = vfn; d.fragmentFunction = pfn;
 	MTLVertexDescriptor *vd = [MTLVertexDescriptor vertexDescriptor];
@@ -1114,24 +1144,192 @@ static void applyDynamicState() {
 	}
 }
 
+#if MR_TRACE
+static std::string traceTex(uint32_t id) {
+	Texture *t = texture(id);
+	if (!t) return std::to_string(id) + "(none)";
+	char b[160];
+	snprintf(b, sizeof b, "%u[dxgi%u fmt%lu %ux%ux%u mips%u s%u bind%#x%s%s]", id, t->dxgi, (unsigned long)t->format, t->width, t->height, t->depthOrLayers, t->mips, t->samples, t->bind,
+	         t->alphaView ? " alphaView" : "", t->bcKind ? " bc" : "");
+	return b;
+}
+static std::string traceWords(uint32_t id) {
+	State *s = state(id);
+	if (!s) return "-";
+	std::string o = std::to_string(id) + "{";
+	for (size_t i = 0; i < s->words.size() && i < 20; i++) o += (i ? "," : "") + std::to_string(s->words[i]);
+	return o + "}";
+}
+static void traceDraw(const uint32_t *p, Shader *vs, Shader *ps, Layout *lay, const char *outcome) {
+	if (T.state != 2) return;
+	T.n++;
+	std::string rts;
+	for (int i = 0; i < 8; i++) if (R->rt[i].tex) {
+		rts += " rt" + std::to_string(i) + "=" + traceTex(R->rt[i].tex) + "/v" + std::to_string(R->rt[i].fmt) + "m" + std::to_string(R->rt[i].mip);
+		if (std::find(T.rts.begin(), T.rts.end(), R->rt[i].tex) == T.rts.end()) T.rts.push_back(R->rt[i].tex);
+	}
+	if (R->ds.tex) rts += " ds=" + traceTex(R->ds.tex) + "/f" + std::to_string(R->ds.flags);
+	std::string tex;
+	for (int st = 0; st < 2; st++) {
+		Shader *sh = st ? ps : vs;
+		if (!sh || !sh->info) continue;
+		for (const ResBinding &b : sh->info->res) {
+			if (b.kind == RUbo || b.kind == RSampler || b.kind == RStorageRO || b.kind == RStorageRW) continue;
+			View *v = view(R->srv[st][(b.binding - 32) & 127], OSrv);
+			tex += std::string(st ? " ps" : " vs") + "t" + std::to_string(b.binding - 32) + "=" + (v ? (v->isBuf ? "buf" : traceTex(v->res) + "/v" + std::to_string(v->fmt)) : "null");
+		}
+		for (const ResBinding &b : sh->info->res) if (b.kind == RSampler) tex += std::string(st ? " ps" : " vs") + "s" + std::to_string(b.binding - 16) + "=" + traceWords(R->smp[st][(b.binding - 16) & 15]);
+	}
+	std::string vbs;
+	if (lay) {
+		for (auto &e : lay->els) vbs += " el(" + std::to_string(e.sem) + ":" + std::to_string(e.idx) + " f" + std::to_string(e.fmt) + " s" + std::to_string(e.slot) + " o" + std::to_string(e.offset) + ")";
+		for (auto &s : lay->slots) vbs += " vb" + std::to_string(s.first) + "=" + std::to_string(R->vb[s.first].buf) + "/" + std::to_string(R->vb[s.first].stride);
+	}
+	if (vs) for (auto &s : vs->sig) vbs += " sig(" + std::to_string(s.sem) + ":" + std::to_string(s.idx) + "->" + std::to_string(s.reg) + ")";
+	// small non-indexed draws (blits, UI quads): the vertices and the pixel shader's constant buffers
+	if (p[0] == 0 && p[1] <= 6 && lay && !lay->slots.empty()) {
+		auto &v = R->vb[lay->slots[0].first];
+		Buffer *b = buffer(v.buf);
+		if (b && b->buf && v.stride && v.stride <= 64) {
+			char t[64];
+			for (uint32_t i = 0; i < p[1]; i++) {
+				uint64_t off = v.offset + (uint64_t)(p[3] + i) * v.stride;
+				if (off + v.stride > b->bytes) break;
+				const float *f = (const float *)((const uint8_t *)b->buf.contents + off);
+				vbs += " v" + std::to_string(i) + "(";
+				for (uint32_t k = 0; k < v.stride / 4; k++) { snprintf(t, sizeof t, "%s%.3g", k ? "," : "", f[k]); vbs += t; }
+				vbs += ")";
+			}
+		}
+		{		// the vertex stage's b1 (RAGE's transform block, rows 8..11 = world-view-projection), bound or not
+			const auto &c = R->cb[0][1];
+			Buffer *cb = buffer(c.buf);
+			char t[64];
+			if (cb && !cb->shadow.empty()) {
+				vbs += " vscb1[";
+				for (uint32_t k = 32; k < 48 && c.first * 16 + k * 4 + 4 <= cb->shadow.size(); k++) { float fv; memcpy(&fv, cb->shadow.data() + c.first * 16 + k * 4, 4); snprintf(t, sizeof t, "%s%.3g", k > 32 ? "," : "", fv); vbs += t; }
+				vbs += "]";
+			}
+			snprintf(t, sizeof t, " vs%u ps%u", R->shader[0], R->shader[1]);
+			vbs += t;
+		}
+		if (ps && ps->info) for (const ResBinding &rb : ps->info->res) if (rb.kind == RUbo && rb.binding != 15) {
+			const auto &c = R->cb[1][rb.binding & 15];
+			Buffer *cb = buffer(c.buf);
+			if (!cb || cb->shadow.empty()) continue;
+			char t[64];
+			vbs += " cb" + std::to_string(rb.binding) + "[";
+			for (uint32_t k = 0; k < rb.size / 4 && c.first * 16 + k * 4 + 4 <= cb->shadow.size() && k < 64; k++) { float fv; memcpy(&fv, cb->shadow.data() + c.first * 16 + k * 4, 4); snprintf(t, sizeof t, "%s%.3g", k ? "," : "", fv); vbs += t; }
+			vbs += "]";
+		}
+	}
+	tracef("D%llu %s | %s + %s | k%u c%u i%u st%u bv%d topo%u |%s | blend=%s bf=%.2f,%.2f,%.2f,%.2f mask=%#x | dss=%s ref%u | rs=%s | vp=%.0f,%.0f,%.0f,%.0f sc%d=%u,%u,%u,%u |%s |%s",
+	       (unsigned long long)T.n, outcome, vs && vs->info ? vs->info->label.c_str() : (vs ? vs->hash.c_str() : "-"), ps && ps->info ? ps->info->label.c_str() : (ps ? ps->hash.c_str() : "-"),
+	       p[0], p[1], p[2], p[3], (int32_t)p[4], R->topo, rts.c_str(), traceWords(R->blendId).c_str(), R->blendFactor[0], R->blendFactor[1], R->blendFactor[2], R->blendFactor[3], R->blendMask,
+	       traceWords(R->dssId).c_str(), R->dssRef, traceWords(R->rsId).c_str(), R->viewport[0], R->viewport[1], R->viewport[2], R->viewport[3], R->hasScissor,
+	       R->scissor[0], R->scissor[1], R->scissor[2], R->scissor[3], tex.c_str(), vbs.c_str());
+}
+#else
+static inline void traceDraw(const uint32_t *, Shader *, Shader *, Layout *, const char *) {}
+#endif
+
+static void capture(Texture *t, const std::string &name, id<MTLRenderPipelineState> pipe = nil, id<MTLTexture> second = nil);
+static void drawInner(const uint32_t *p);
+static const char *drawOutcome;
 static void draw(const uint32_t *p) {
+	drawOutcome = "ok";
+	drawInner(p);
+#if MR_TRACE
+	if (T.state == 2) {
+		traceDraw(p, R->objs.as<Shader>(R->shader[0], OShader), R->objs.as<Shader>(R->shader[1], OShader), R->objs.as<Layout>(R->layout, OLayout), drawOutcome);
+		// targets around alpha-only writes (masks): the colour target's alpha and the depth/stencil buffer
+		State *bs = state(R->blendId);
+		if (bs && bs->words.size() >= 10 && (bs->words[9] & 0xf) == 8 && T.snaps < 8 && T.alphaPipe) {
+			T.snaps++;
+			endEncoders();
+			std::string tag = "trace-D" + std::to_string(T.n);
+			capture(texture(R->rt[0].tex), tag + "-alpha-rt" + std::to_string(R->rt[0].tex), T.alphaPipe);
+			for (int slot = 0; slot < 16; slot++) {		// the textures the pixel shader reads (colour and alpha)
+				View *v = view(R->srv[1][slot], OSrv);
+				Texture *st = v && !v->isBuf ? texture(v->res) : nullptr;
+				if (!st || !st->tex || st->isDepth || st->samples > 1 || st->tex.textureType != MTLTextureType2D) continue;
+				capture(st, tag + "-t" + std::to_string(slot) + "-tex" + std::to_string(v->res));
+				capture(st, tag + "-t" + std::to_string(slot) + "-tex" + std::to_string(v->res) + "-alpha", T.alphaPipe);
+			}
+			Texture *dt = texture(R->ds.tex);
+			if (dt && dt->tex && dt->hasStencil && dt->samples == 1) {
+				id<MTLTexture> st = [dt->tex newTextureViewWithPixelFormat:MTLPixelFormatX32_Stencil8];
+				capture(dt, tag + "-ds" + std::to_string(R->ds.tex), T.dsPipe, st);
+			}
+		}
+	}
+#endif
+}
+// ---- game-side workaround: the minimap (radar) alpha mask ------------------------------------------------------------
+// The minimap is drawn into a screen-sized target of its own and then blended over the frame with that target's alpha
+// (im::PS_Blit, SRC_ALPHA / INV_SRC_ALPHA). The alpha comes from a mask pass: the target's alpha is cleared to 0, then the
+// radar mask texture (a soft-edged rounded rectangle, bound at t2) is blitted into the alpha over the minimap rectangle.
+// The game issues that mask draw with the programs of the *next* pass of im.fxc's gtadrawblit technique (pass 15:
+// VS_Blit + PS_BlitDepthToAlpha) while its data is for pass 14 (VS_GTABlit + PS_BlitToAlpha): the vertices are in 0..1
+// screen space for the ortho transform in the vertex stage's b1, the b5 constants are BlitToAlpha's (the mask's texel size,
+// a channel selector, an output range) and BlitDepthToAlpha's depth texture (t5) is never bound. Executed as issued (the
+// web build's WebGPU renderer does the same), the quad lands in the top half of the screen and samples whatever t5 held,
+// the minimap's alpha stays 0 and only the blips show. The draw is run with the programs its data was made for:
+// im::VS_TransformUnlit_IM (the b1-transforming blit vertex shader, same code as VS_GTABlit) + im::PS_BlitToAlpha.
+// Only when nothing depth-like is bound at t5, so a real depth-to-alpha blit (if the game ever issues one) is untouched.
+struct MaskPrograms { ShaderInfo *blitVs, *depthToAlpha, *transformVs, *toAlpha; bool looked; };
+static MaskPrograms maskPrograms = {};
+static Shader *gameShaderFor(ShaderInfo *info) {
+	auto it = info ? R->shaderObjects.find(info) : R->shaderObjects.end();
+	if (it == R->shaderObjects.end()) return nullptr;
+	Shader *s = R->objs.as<Shader>(it->second, OShader);
+	if (!s || s->info != info) { R->shaderObjects.erase(it); return nullptr; }
+	return s;
+}
+static bool minimapMaskSwap(Shader *&vs, Shader *&ps) {
+	MaskPrograms &m = maskPrograms;
+	if (!m.looked) {
+		m.looked = true;
+		m.blitVs = findShader("4e1d5d361e0ed0bc");		// im::VS_Blit
+		m.depthToAlpha = findShader("7f531ca66548aefe");	// im::PS_BlitDepthToAlpha
+		m.transformVs = findShader("028921879df627f5");	// im::VS_TransformUnlit_IM
+		m.toAlpha = findShader("bc10d4d035fb7863");		// im::PS_BlitToAlpha
+		if (!m.blitVs || !m.depthToAlpha || !m.transformVs || !m.toAlpha) logf("Metal renderer: minimap mask programs not in the shader library (the minimap may stay blank)");
+#if MR_TRACE
+		if (getenv("PG_MR_NO_MASK_FIX")) { m.depthToAlpha = nullptr; logf("Metal renderer [trace]: minimap mask fix disabled"); }		// before/after comparisons
+#endif
+	}
+	if (!ps || ps->info != m.depthToAlpha || vs->info != m.blitVs || !m.depthToAlpha) return false;
+	View *v = view(R->srv[1][5], OSrv);
+	Texture *t = v && !v->isBuf ? texture(v->res) : nullptr;
+	if (t && t->isDepth) return false;
+	Shader *tvs = gameShaderFor(m.transformVs), *tps = gameShaderFor(m.toAlpha);
+	if (!tvs || !tps) { logOnce("maskswap", "Metal renderer: minimap mask programs were not created by the game"); return false; }
+	vs = tvs; ps = tps;
+	return true;
+}
+
+static void drawInner(const uint32_t *p) {
 	uint32_t kind = p[0], count = p[1], inst = p[2], start = p[3], startInstance = p[5];
 	int32_t baseVertex = (int32_t)p[4];
 	Shader *vs = R->objs.as<Shader>(R->shader[0], OShader);
 	Shader *ps = R->objs.as<Shader>(R->shader[1], OShader);
 	Layout *lay = R->objs.as<Layout>(R->layout, OLayout);
-	if (!vs || !vs->info || !lay || (ps && !ps->info)) { R->skipped++; R->skipReasons[(!vs || !lay) ? 0 : 1]++; return; }
+	if (!vs || !vs->info || !lay || (ps && !ps->info)) { drawOutcome = "SKIP-shader"; R->skipped++; R->skipReasons[(!vs || !lay) ? 0 : 1]++; return; }
+	bool maskSwap = minimapMaskSwap(vs, ps);
+	if (maskSwap != R->lastMaskSwap) { R->lastMaskSwap = maskSwap; R->pipeDirty = true; }
+	if (maskSwap) drawOutcome = "ok-maskswap";
 	prepareProxies(vs->info, 0);
 	if (ps) prepareProxies(ps->info, 1);
-	if (!ensurePass()) { R->skipped++; R->skipReasons[2]++; return; }
+	if (!ensurePass()) { drawOutcome = "SKIP-norT"; R->skipped++; R->skipReasons[2]++; return; }
 	Pipe *pipe = R->lastPipe;
 	if (R->pipeDirty || !pipe) {
 		pipe = getPipeline(vs, ps, lay);
 		R->lastPipe = pipe;
 		R->pipeDirty = false;
 	}
-	if (!pipe->ready.load(std::memory_order_acquire)) { R->pendingSkips++; R->skipped++; R->pipeDirty = true; return; }
-	if (!pipe->state) { R->skipped++; R->skipReasons[3]++; return; }
+	if (!pipe->ready.load(std::memory_order_acquire)) { drawOutcome = "SKIP-pending"; R->pendingSkips++; R->skipped++; R->pipeDirty = true; return; }
+	if (!pipe->state) { drawOutcome = "SKIP-pipefail"; R->skipped++; R->skipReasons[3]++; return; }
 	if (pipe->state != R->appliedPipe) { [R->pass setRenderPipelineState:pipe->state]; R->appliedPipe = pipe->state; }
 	applyDynamicState();
 	bindStage(0, vs->info);
@@ -1190,7 +1388,7 @@ static void draw(const uint32_t *p) {
 	}
 	if (dCount != count || dInst != inst) {
 		R->clamped++;
-		if (!dCount || !dInst) { R->skipped++; R->skipReasons[4]++; return; }
+		if (!dCount || !dInst) { drawOutcome = "SKIP-clamp"; R->skipped++; R->skipReasons[4]++; return; }
 	}
 	if (!dCount || !dInst) return;
 	if (indexed)
@@ -1465,15 +1663,17 @@ static void savePNG(id<MTLBuffer> buf, uint32_t w, uint32_t h, uint32_t bpr, std
 	logf("Native rendered frame saved: %s", name.c_str());
 }
 
-static void capture(Texture *t, const std::string &name) {
+static void capture(Texture *t, const std::string &name, id<MTLRenderPipelineState> pipe, id<MTLTexture> second) {
 	if (!t || !t->tex) return;
+	if (!pipe) pipe = R->capturePipe;
 	MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:t->width height:t->height mipmapped:NO];
 	d.usage = MTLTextureUsageRenderTarget; d.storageMode = MTLStorageModePrivate;
 	id<MTLTexture> target = [R->device newTextureWithDescriptor:d];
 	MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
 	rp.colorAttachments[0].texture = target; rp.colorAttachments[0].loadAction = MTLLoadActionDontCare; rp.colorAttachments[0].storeAction = MTLStoreActionStore;
 	id<MTLRenderCommandEncoder> e = [commandBuffer() renderCommandEncoderWithDescriptor:rp];
-	[e setRenderPipelineState:R->capturePipe]; [e setFragmentTexture:t->tex atIndex:0];
+	[e setRenderPipelineState:pipe]; [e setFragmentTexture:t->tex atIndex:0];
+	if (second) [e setFragmentTexture:second atIndex:1];
 	[e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
 	[e endEncoding];
 	uint32_t bpr = t->width * 4;
@@ -1507,6 +1707,25 @@ static void present(uint32_t texId) {
 			t->lastUse = R->serial;
 		}
 	}
+#if MR_TRACE
+	if (T.state == 2) {		// the traced frame is complete: save the targets it drew into
+		tracef("PRESENT %s", traceTex(texId).c_str());
+		capture(t, "trace-present");
+		for (uint32_t id : T.rts) {
+			Texture *rt = texture(id);
+			if (rt && rt->tex && !rt->isDepth && rt->samples == 1 && rt->tex.textureType == MTLTextureType2D && id != texId) capture(rt, "trace-rt" + std::to_string(id));
+		}
+		fclose(T.f); T.f = nullptr; T.state = 3;
+		logf("Metal renderer: traced frame written (%llu draws, %zu targets)", (unsigned long long)T.n, T.rts.size());
+	} else if (T.state == 1 && CACurrentMediaTime() >= T.at) {
+		NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+		T.f = fopen([docs stringByAppendingPathComponent:@"mr-trace.txt"].UTF8String, "w");
+		T.state = T.f ? 2 : 3;
+	} else if (T.state == 0 && R->worldSent) {
+		const char *env = getenv("PG_MR_TRACE");
+		if (env && *env) { T.at = CACurrentMediaTime() + atof(env); T.state = 1; } else T.state = 3;
+	}
+#endif
 	FrameRing &f = R->frames[R->frame % FRAME_SLOTS];
 	commit(CPresent, drawable);
 	f.lastSerial = R->serial - 1;
@@ -1553,6 +1772,18 @@ static void createShader(const uint32_t *p) {
 	uint32_t nin = p[4];
 	for (uint32_t i = 0; i < nin && i < 64; i++) s->sig.push_back({p[5 + i * 4], p[6 + i * 4], p[7 + i * 4], p[8 + i * 4]});
 	s->info = findShader(s->hash);
+	if (s->info) R->shaderObjects.emplace(s->info, p[0]);
+#if MR_TRACE
+	static FILE *shaderList = nullptr;
+	static bool shaderListChecked = false;
+	if (!shaderListChecked) {
+		shaderListChecked = true;
+		const char *env = getenv("PG_MR_TRACE");
+		NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+		if (env && *env) shaderList = fopen([docs stringByAppendingPathComponent:@"mr-shaders.txt"].UTF8String, "w");
+	}
+	if (shaderList) { fprintf(shaderList, "%u %u %s %s\n", p[0], p[1], hash, s->info ? s->info->label.c_str() : "-"); fflush(shaderList); }
+#endif
 	if (!s->info && s->stage <= 2) logOnce("noshader" + s->hash, "Metal renderer: no precompiled shader %s (stage %u)", hash, s->stage);
 	R->objs.set(p[0], s);
 }
@@ -1600,6 +1831,7 @@ static void destroyObject(uint32_t oid) {
 	}
 	if (o->kind == OQuery && R->activeOcclusion == o) { endOcclusionInPass(); R->activeOcclusion = nullptr; }
 	if (o->kind == OQuery) for (auto &pq : R->pendingQueries) if (pq.q == o) pq.q = nullptr;
+	if (o->kind == OShader) { Shader *s = (Shader *)o; auto it = s->info ? R->shaderObjects.find(s->info) : R->shaderObjects.end(); if (it != R->shaderObjects.end() && it->second == oid) R->shaderObjects.erase(it); }
 	if (o->kind == OBuffer || o->kind == OLayout || o->kind == OState || o->kind == OShader) R->pipeDirty = true;
 	R->objs.erase(oid);
 }
@@ -1628,6 +1860,26 @@ static bool isStateOp(uint32_t op) {
 
 static void execute(uint32_t op, const uint32_t *p, uint32_t n) {
 	const float *pf = (const float *)p;
+#if MR_TRACE
+	if (T.state == 2) switch (op) {
+	case CLEAR_RT: tracef("CLEAR_RT %s mip%u slice%u %.3f,%.3f,%.3f,%.3f", traceTex(p[0]).c_str(), p[1], p[2], pf[3], pf[4], pf[5], pf[6]); break;
+	case CLEAR_DS: tracef("CLEAR_DS %s flags%u z%.3f s%u", traceTex(p[0]).c_str(), p[3], pf[4], p[5]); break;
+	case COPY_REGION: tracef("COPY_REGION dst %u sub%u at %u,%u <- src %u sub%u box%u %u,%u-%u,%u", p[0], p[1], p[2], p[3], p[5], p[6], p[7], p[8], p[9], p[11], p[12]); break;
+	case COPY_RESOURCE: tracef("COPY_RESOURCE %u <- %u", p[0], p[1]); break;
+	case RESOLVE: tracef("RESOLVE %s <- %s", traceTex(p[0]).c_str(), traceTex(p[2]).c_str()); break;
+	case GENERATE_MIPS: tracef("GENERATE_MIPS srv%u", p[0]); break;
+	case DISPATCH: tracef("DISPATCH %s", R->objs.as<Shader>(R->shader[2], OShader) && R->objs.as<Shader>(R->shader[2], OShader)->info ? R->objs.as<Shader>(R->shader[2], OShader)->info->label.c_str() : "?"); break;
+	case UPLOAD_TEXTURE: tracef("UPLOAD_TEXTURE %s mip%u slice%u %u,%u %ux%u", traceTex(p[0]).c_str(), p[1], p[2], p[3], p[4], p[6], p[7]); break;
+	case CREATE_TEXTURE: tracef("CREATE_TEXTURE %u dim%u %ux%u dxgi%u bind%#x", p[0], p[1], p[2], p[3], p[7], p[8]); break;
+	case CREATE_SRV: tracef("CREATE_SRV %u res%u fmt%u", p[0], p[2], p[3]); break;
+	case READBACK: tracef("READBACK %u", p[0]); break;
+	case SET_SRVS: { std::string o; for (uint32_t i = 0; i < p[2]; i++) { View *v = view(p[3 + i], OSrv); o += " t" + std::to_string(p[1] + i) + "=" + std::to_string(p[3 + i]) + (v ? (v->isBuf ? "(buf)" : "(" + std::to_string(v->res) + " f" + std::to_string(v->fmt) + ")") : "(null)"); } tracef("SET_SRVS st%u%s", p[0], o.c_str()); break; }
+	case SET_RENDER_TARGETS: tracef("SET_RENDER_TARGETS rt0=%u ds=%u", p[0], p[32]); break;
+	case DESTROY_OBJECT: tracef("DESTROY %u", p[0]); break;
+	case CLEAR_STATE: tracef("CLEAR_STATE"); break;
+	default: break;
+	}
+#endif
 	if (!isStateOp(op)) flushClears();
 	switch (op) {
 	case NOP: case INIT: break;
@@ -1803,6 +2055,8 @@ using namespace metal;
 struct V { float4 p [[position]]; };
 vertex V pg_fullscreen(uint i [[vertex_id]]) { float2 q[3] = {float2(-1, -1), float2(3, -1), float2(-1, 3)}; V v; v.p = float4(q[i], 0, 1); return v; }
 fragment float4 pg_blit(V in [[stage_in]], texture2d<float> t [[texture(0)]]) { return t.read(uint2(in.p.xy)); }
+fragment float4 pg_alpha(V in [[stage_in]], texture2d<float> t [[texture(0)]]) { float a = t.read(uint2(in.p.xy)).a; return float4(a, a, a, 1); }
+fragment float4 pg_ds(V in [[stage_in]], depth2d<float> d [[texture(0)]], texture2d<uint> s [[texture(1)]]) { float z = d.read(uint2(in.p.xy)); uint st = s.read(uint2(in.p.xy)).r; return float4(z != 0 ? 1.0 : 0.0, saturate(z * 20.0), st != 0 ? 1.0 : 0.0, 1); }
 struct D { float depth [[depth(any)]]; };
 fragment D pg_depth_copy(V in [[stage_in]], texture2d<float> t [[texture(0)]]) { D d; d.depth = t.read(uint2(in.p.xy)).x; return d; }
 )";
@@ -1837,6 +2091,13 @@ static bool setup() {
 	pd.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
 	R->blitPipe = [R->device newRenderPipelineStateWithDescriptor:pd error:&error];
 	R->capturePipe = R->blitPipe;
+#if MR_TRACE
+	pd.fragmentFunction = [helpers newFunctionWithName:@"pg_alpha"];
+	T.alphaPipe = [R->device newRenderPipelineStateWithDescriptor:pd error:&error];
+	pd.fragmentFunction = [helpers newFunctionWithName:@"pg_ds"];
+	T.dsPipe = [R->device newRenderPipelineStateWithDescriptor:pd error:&error];
+	if (!T.alphaPipe || !T.dsPipe) logf("Metal renderer: trace pipelines failed: %s", error.localizedDescription.UTF8String);
+#endif
 	MTLRenderPipelineDescriptor *dp = [MTLRenderPipelineDescriptor new];
 	dp.vertexFunction = pd.vertexFunction;
 	dp.fragmentFunction = [helpers newFunctionWithName:@"pg_depth_copy"];
