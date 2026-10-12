@@ -31,7 +31,7 @@ enum GameFolder {
     static func findInAppFolder() -> Bool {
         if isChosen && !inAppFolder { return false }
         guard let data = findData(in: appFolder, depth: 4) else {
-            if inAppFolder { log("The game folder is no longer in the app's folder."); clear() }
+            if inAppFolder { log(AppLanguage.choose("The game folder is no longer in the app's folder.", "App 資料夾中已找不到遊戲資料。")); clear() }
             return false
         }
         if let problem = check(data) {
@@ -58,7 +58,7 @@ enum GameFolder {
         defer { if scoped { picked.stopAccessingSecurityScopedResource() } }
         log("Folder picked: \(picked.path) (access granted: \(scoped), \(describeLocation(picked)))")
         guard FileManager.default.isReadableFile(atPath: picked.path) else {
-            return "The app was not allowed to open that folder. Move your game folder to Files › On My iPhone › GTA V Port instead; the app finds it there by itself."
+            return AppLanguage.choose("The app was not allowed to open that folder. Move your game folder to Files › On My iPhone › GTA V Port instead; the app finds it there by itself.", "App 沒有權限讀取此資料夾。請改移到「檔案 › 我的 iPhone › GTA V Port」，App 便能自動偵測。")
         }
         guard let data = findData(in: picked, depth: 4) else { return wrongFolderMessage(picked) }
         if let problem = check(data) { return problem }
@@ -71,7 +71,7 @@ enum GameFolder {
             log("Game folder accepted: data at \(relative(data, to: picked).isEmpty ? "(the picked folder)" : relative(data, to: picked))")
             return nil
         } catch {
-            return "The app could not remember that folder: \(error.localizedDescription)"
+            return AppLanguage.choose("The app could not remember that folder: \(error.localizedDescription)", "無法儲存資料夾位置：\(error.localizedDescription)")
         }
     }
 
@@ -130,16 +130,16 @@ enum GameFolder {
         let hasEngine = manager.fileExists(atPath: picked.appendingPathComponent("game.wasm").path)
             || manager.fileExists(atPath: picked.appendingPathComponent("8b0b5899ed/game.wasm").path)
         if name == "b" || name == "8b0b5899ed" || name == "shaders" || hasEngine {
-            return "You opened the \"\(name)\" folder. Go back up one or two levels and pick the folder that has both \"data\" and \"b\" inside, then tap Open there."
+            return AppLanguage.choose("You opened the \"\(name)\" folder. Go back up one or two levels and pick the folder that has both \"data\" and \"b\" inside, then tap Open there.", "你開啟的是「\(name)」資料夾。請返回上一層或上兩層，選擇同時包含「data」和「b」的資料夾，再按「開啟」。")
         }
-        return "There is no game in \"\(name)\". Pick the folder that has both \"data\" and \"b\" inside (or any folder above it).\n\nEasiest: move your game folder into Files › On My iPhone › GTA V Port. The app finds it there by itself."
+        return AppLanguage.choose("There is no game in \"\(name)\". Pick the folder that has both \"data\" and \"b\" inside (or any folder above it).\n\nEasiest: move your game folder into Files › On My iPhone › GTA V Port. The app finds it there by itself.", "「\(name)」中找不到遊戲。請選擇包含「data」與「b」的資料夾，或其上層資料夾。\n\n建議將整個遊戲資料夾移至「檔案 › 我的 iPhone › GTA V Port」，App 會自動偵測。")
     }
 
     /// Compares a sample of files (the first ones, the biggest ones) with the game's file list.
     private static func check(_ data: URL) -> String? {
         guard let path = EnginePaths.manifest,
               let json = try? JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: path))) as? [String: Any],
-              let files = json["files"] as? [[Any]] else { return "The app's game file list is missing." }
+              let files = json["files"] as? [[Any]] else { return AppLanguage.choose("The app's game file list is missing.", "App 缺少遊戲檔案清單。") }
         let entries = files.compactMap { entry -> (String, UInt64)? in
             guard entry.count >= 2, let name = entry[0] as? String, let size = (entry[1] as? NSNumber)?.uint64Value else { return nil }
             return (name, size)
@@ -150,12 +150,12 @@ enum GameFolder {
             if !FileManager.default.fileExists(atPath: file.path) {
                 let cloud = file.deletingLastPathComponent().appendingPathComponent("." + file.lastPathComponent + ".icloud")
                 if FileManager.default.fileExists(atPath: cloud.path) {
-                    return "Some game files are only in iCloud, not on this iPhone. Move the game folder to Files › On My iPhone › GTA V Port and try again."
+                    return AppLanguage.choose("Some game files are only in iCloud, not on this iPhone. Move the game folder to Files › On My iPhone › GTA V Port and try again.", "部分遊戲檔案仍在 iCloud，尚未下載到此 iPhone。請移至「檔案 › 我的 iPhone › GTA V Port」後重試。")
                 }
-                return "The folder is missing game files (for example \(name)). Is the download or unpacking complete?"
+                return AppLanguage.choose("The folder is missing game files (for example \(name)). Is the download or unpacking complete?", "資料夾缺少遊戲檔案（例如 \(name)）。請確認是否已下載或解壓縮完成。")
             }
             let actual = (try? FileManager.default.attributesOfItem(atPath: file.path)[.size] as? NSNumber)?.uint64Value ?? 0
-            if actual != size { return "\(name) has a different size than the game expects. The folder may be incomplete or from another version." }
+            if actual != size { return AppLanguage.choose("\(name) has a different size than the game expects. The folder may be incomplete or from another version.", "\(name) 的大小與遊戲預期不同，可能資料不完整或版本不符。") }
         }
         return nil
     }

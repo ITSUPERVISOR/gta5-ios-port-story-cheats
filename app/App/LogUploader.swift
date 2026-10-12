@@ -16,7 +16,7 @@ enum LogUploader {
             body.append(data.count > perLog ? data.suffix(perLog) : data)
             body.append("\n".data(using: .utf8)!)
         }
-        guard !body.isEmpty else { DispatchQueue.main.async { done(("No log yet", "Start the game once, then try again.")) }; return }
+        guard !body.isEmpty else { DispatchQueue.main.async { done((AppLanguage.choose("No log yet", "尚無紀錄"), AppLanguage.choose("Start the game once, then try again.", "請先啟動一次遊戲，再重試。"))) }; return }
         var request = URLRequest(url: endpoint, timeoutInterval: 60)
         request.httpMethod = "POST"
         request.setValue("text/plain; charset=utf-8", forHTTPHeaderField: "Content-Type")
@@ -28,18 +28,18 @@ enum LogUploader {
             let reply = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
             let result: (String, String)
             if status == 200 {
-                result = ("Log sent, thank you!", "Reference: \(reply?["id"] as? String ?? "-"). Mention it if you also ask for help in the community.")
+                result = (AppLanguage.choose("Log sent, thank you!", "紀錄已傳送，謝謝！"), AppLanguage.choose("Reference: \(reply?["id"] as? String ?? "-"). Mention it if you also ask for help in the community.", "參考編號：\(reply?["id"] as? String ?? "-")。如需向社群求助，請提供此編號。"))
             } else if error != nil {
-                result = ("Couldn't send the log", "No internet connection? Try again, or use Share log instead.")
+                result = (AppLanguage.choose("Couldn't send the log", "無法傳送紀錄"), AppLanguage.choose("No internet connection? Try again, or use Share log instead.", "請確認網路連線，或改用「分享紀錄」。"))
             } else {
-                result = ("Couldn't send the log", (reply?["error"] as? String) ?? "Try again later, or use Share log instead.")
+                result = (AppLanguage.choose("Couldn't send the log", "無法傳送紀錄"), (reply?["error"] as? String) ?? AppLanguage.choose("Try again later, or use Share log instead.", "請稍後再試，或改用「分享紀錄」。"))
             }
             DispatchQueue.main.async { done(result) }
         }.resume()
     }
 }
 
-/// "Send log to the developer": its own screen so the buttons stay visible above the keyboard in landscape.
+/// AppLanguage.choose("Send log to the developer", "傳送紀錄給開發者"): its own screen so the buttons stay visible above the keyboard in landscape.
 final class SendLogViewController: UIViewController {
     private let note = UITextView()
     private let status = UILabel()
@@ -47,14 +47,14 @@ final class SendLogViewController: UIViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        title = "Send log to the developer"
+        title = AppLanguage.choose("Send log to the developer", "傳送紀錄給開發者")
         view.backgroundColor = .systemGroupedBackground
         navigationItem.leftBarButtonItem = UIBarButtonItem(systemItem: .cancel, primaryAction: UIAction { [weak self] _ in self?.dismiss(animated: true) })
-        navigationItem.rightBarButtonItem = UIBarButtonItem(title: "Send", primaryAction: UIAction { [weak self] _ in self?.send() })
+        navigationItem.rightBarButtonItem = UIBarButtonItem(title: AppLanguage.choose("Send", "傳送"), primaryAction: UIAction { [weak self] _ in self?.send() })
         navigationItem.rightBarButtonItem?.style = .done
 
         let info = UILabel()
-        info.text = "Sends this run's game log and the previous one: your iPhone model, iOS version, app settings and what the game printed. No personal data, photos or contacts."
+        info.text = AppLanguage.choose("Sends this run's game log and the previous one: your iPhone model, iOS version, app settings and what the game printed. No personal data, photos or contacts.", "將傳送本次與前次遊戲紀錄，包含 iPhone 型號、iOS 版本、App 設定和遊戲輸出，不包含相片或聯絡人。")
         info.numberOfLines = 0
         info.font = .preferredFont(forTextStyle: .footnote)
         info.textColor = .secondaryLabel
@@ -62,9 +62,9 @@ final class SendLogViewController: UIViewController {
         note.layer.cornerRadius = 10
         note.backgroundColor = .secondarySystemGroupedBackground
         note.textContainerInset = UIEdgeInsets(top: 10, left: 8, bottom: 10, right: 8)
-        note.accessibilityLabel = "What happened? (optional)"
+        note.accessibilityLabel = AppLanguage.choose("What happened? (optional)", "發生了什麼事？（可略過）")
         let placeholder = UILabel()
-        placeholder.text = "What happened? (optional)"
+        placeholder.text = AppLanguage.choose("What happened? (optional)", "發生了什麼事？（可略過）")
         placeholder.textColor = .placeholderText
         placeholder.font = note.font
         placeholder.tag = 7
@@ -98,7 +98,7 @@ final class SendLogViewController: UIViewController {
     private func send() {
         navigationItem.rightBarButtonItem?.isEnabled = false
         note.resignFirstResponder()
-        status.text = "Sending…"
+        status.text = AppLanguage.choose("Sending…", "傳送中…")
         LogUploader.send(note: note.text ?? "") { [weak self] result in
             guard let self else { return }
             let done = self.finished

@@ -103,7 +103,7 @@ final class ControlButton: UIView {
         layer.borderColor = UIColor.white.withAlphaComponent(pressed ? 0.9 : 0.28).cgColor
         icon.tintColor = pressed ? UIColor.black.withAlphaComponent(0.9) : UIColor.white.withAlphaComponent(0.92)
         ring.opacity = active && !pressed ? 1 : 0
-        accessibilityValue = pressed ? "Held" : active ? "On" : nil
+        accessibilityValue = pressed ? AppLanguage.choose("Held", "按住") : active ? AppLanguage.choose("On", "開啟") : nil
     }
 
     func setPressed(_ value: Bool) {
@@ -246,51 +246,94 @@ final class TouchControlsView: UIView {
     private let haptics = UIImpactFeedbackGenerator(style: .light)
 
     // On foot
-    private let fire = ControlButton("fire", icon: "fire", label: "Fire")
-    private let aim = ControlButton("aim", icon: "aim", label: "Aim")
-    private let leftFire = ControlButton("leftFire", icon: "fire", label: "Fire, left hand")
-    private let jump = ControlButton("jump", icon: "jump", label: "Jump")
-    private let enter = ControlButton("enter", icon: "enter_exit", label: "Enter vehicle")
-    private let weapons = ControlButton("weapons", icon: "weapons", label: "Weapon wheel")
-    private let reload = ControlButton("reload", icon: "reload", label: "Reload")
-    private let cover = ControlButton("cover", icon: "cover", label: "Take cover")
-    private let crouch = ControlButton("crouch", icon: "crouch", label: "Stealth")
-    private let switcher = ControlButton("switchCharacter", icon: "switch_character", label: "Switch character")
+    private let fire = ControlButton("fire", icon: "fire", label: AppLanguage.choose("Fire", "開火"))
+    private let aim = ControlButton("aim", icon: "aim", label: AppLanguage.choose("Aim", "瞄準"))
+    private let leftFire = ControlButton("leftFire", icon: "fire", label: AppLanguage.choose("Fire, left hand", "左手開火"))
+    private let jump = ControlButton("jump", icon: "jump", label: AppLanguage.choose("Jump", "跳躍"))
+    private let enter = ControlButton("enter", icon: "enter_exit", label: AppLanguage.choose("Enter vehicle", "上車"))
+    private let weapons = ControlButton("weapons", icon: "weapons", label: AppLanguage.choose("Weapon wheel", "武器輪盤"))
+    private let reload = ControlButton("reload", icon: "reload", label: AppLanguage.choose("Reload", "換彈"))
+    private let cover = ControlButton("cover", icon: "cover", label: AppLanguage.choose("Take cover", "尋找掩體"))
+    private let crouch = ControlButton("crouch", icon: "crouch", label: AppLanguage.choose("Stealth", "潛行"))
+    private let switcher = ControlButton("switchCharacter", icon: "switch_character", label: AppLanguage.choose("Switch character", "切換角色"))
     // Vehicles
-    private let gas = ControlButton("gas", icon: "gas", label: "Gas")
-    private let brake = ControlButton("brake", icon: "brake", label: "Brake and reverse")
-    private let handbrake = ControlButton("handbrake", icon: "handbrake", label: "Handbrake")
-    private let driveBy = ControlButton("driveBy", icon: "fire", label: "Aim and shoot from vehicle")
-    private let horn = ControlButton("horn", icon: "horn", label: "Horn")
-    private let lookBack = ControlButton("lookBack", icon: "look_back", label: "Look behind")
-    private let vehicleWeapon = ControlButton("vehicleWeapon", icon: "vehicle_weapon", label: "Next vehicle weapon")
-    private let dive = ControlButton("dive", icon: "dive", label: "Dive")
-    private let surface = ControlButton("surface", icon: "surface", label: "Surface")
+    private let gas = ControlButton("gas", icon: "gas", label: AppLanguage.choose("Gas", "油門"))
+    private let brake = ControlButton("brake", icon: "brake", label: AppLanguage.choose("Brake and reverse", "煞車／倒車"))
+    private let handbrake = ControlButton("handbrake", icon: "handbrake", label: AppLanguage.choose("Handbrake", "手煞車"))
+    private let driveBy = ControlButton("driveBy", icon: "fire", label: AppLanguage.choose("Aim and shoot from vehicle", "車內瞄準射擊"))
+    private let horn = ControlButton("horn", icon: "horn", label: AppLanguage.choose("Horn", "喇叭"))
+    private let lookBack = ControlButton("lookBack", icon: "look_back", label: AppLanguage.choose("Look behind", "向後看"))
+    private let vehicleWeapon = ControlButton("vehicleWeapon", icon: "vehicle_weapon", label: AppLanguage.choose("Next vehicle weapon", "切換車輛武器"))
+    private let dive = ControlButton("dive", icon: "dive", label: AppLanguage.choose("Dive", "下潛"))
+    private let surface = ControlButton("surface", icon: "surface", label: AppLanguage.choose("Surface", "浮出水面"))
     // Aircraft
-    private let airFire = ControlButton("airFire", icon: "special", label: "Fire aircraft weapon")
-    private let gear = ControlButton("gear", icon: "landing_gear", label: "Landing gear")
+    private let airFire = ControlButton("airFire", icon: "special", label: AppLanguage.choose("Fire aircraft weapon", "飛行器開火"))
+    private let gear = ControlButton("gear", icon: "landing_gear", label: AppLanguage.choose("Landing gear", "起落架"))
     // Utility bar
-    private let camera = ControlButton("camera", icon: "camera", label: "Change camera")
-    private let phone = ControlButton("phone", icon: "phone", label: "Phone")
-    private let pause = ControlButton("pause", icon: "pause", label: "Pause menu")
-    private let settings = ControlButton("settings", icon: "settings", label: "Settings")
-    private let lights = ControlButton("lights", icon: "lights", label: "Headlights")
-    private let radio = ControlButton("radio", icon: "radio", label: "Radio")
+    private let camera = ControlButton("camera", icon: "camera", label: AppLanguage.choose("Change camera", "切換視角"))
+    private let phone = ControlButton("phone", icon: "phone", label: AppLanguage.choose("Phone", "手機"))
+    private let pause = ControlButton("pause", icon: "pause", label: AppLanguage.choose("Pause menu", "暫停選單"))
+    private let settings = ControlButton("settings", icon: "settings", label: AppLanguage.choose("Settings", "設定"))
+    private let lights = ControlButton("lights", icon: "lights", label: AppLanguage.choose("Headlights", "車燈"))
+    private let radio = ControlButton("radio", icon: "radio", label: AppLanguage.choose("Radio", "電台"))
     // Menu and phone dock
-    private let up = ControlButton("up", icon: "up", label: "Up")
-    private let down = ControlButton("down", icon: "down", label: "Down")
-    private let left = ControlButton("left", icon: "left", label: "Left")
-    private let right = ControlButton("right", icon: "right", label: "Right")
-    private let accept = ControlButton("accept", icon: "accept", label: "Select")
-    private let back = ControlButton("back", icon: "back", label: "Back")
-    private let tabLeft = ControlButton("tabLeft", icon: "tab_left", label: "Previous tab")
-    private let tabRight = ControlButton("tabRight", icon: "tab_right", label: "Next tab")
+    private let up = ControlButton("up", icon: "up", label: AppLanguage.choose("Up", "上"))
+    private let down = ControlButton("down", icon: "down", label: AppLanguage.choose("Down", "下"))
+    private let left = ControlButton("left", icon: "left", label: AppLanguage.choose("Left", "左"))
+    private let right = ControlButton("right", icon: "right", label: AppLanguage.choose("Right", "右"))
+    private let accept = ControlButton("accept", icon: "accept", label: AppLanguage.choose("Select", "確認"))
+    private let back = ControlButton("back", icon: "back", label: AppLanguage.choose("Back", "返回"))
+    private let tabLeft = ControlButton("tabLeft", icon: "tab_left", label: AppLanguage.choose("Previous tab", "上一分頁"))
+    private let tabRight = ControlButton("tabRight", icon: "tab_right", label: AppLanguage.choose("Next tab", "下一分頁"))
 
     private var allButtons: [ControlButton] {
         [fire, aim, leftFire, jump, enter, weapons, reload, cover, crouch, switcher, gas, brake, handbrake, driveBy, horn, lookBack,
          vehicleWeapon, dive, surface, airFire, gear, camera, phone, pause, settings, lights, radio,
          up, down, left, right, accept, back, tabLeft, tabRight]
     }
+    /// Refresh accessibility names for the active language without recreating controls.
+    func refreshLanguage() {
+        let labels: [String: String] = [
+            "fire": AppLanguage.choose("Fire", "開火"),
+            "aim": AppLanguage.choose("Aim", "瞄準"),
+            "leftFire": AppLanguage.choose("Fire, left hand", "左手開火"),
+            "jump": AppLanguage.choose("Jump", "跳躍"),
+            "enter": AppLanguage.choose("Enter vehicle", "上車"),
+            "weapons": AppLanguage.choose("Weapon wheel", "武器輪盤"),
+            "reload": AppLanguage.choose("Reload", "換彈"),
+            "cover": AppLanguage.choose("Take cover", "尋找掩體"),
+            "crouch": AppLanguage.choose("Stealth", "潛行"),
+            "switchCharacter": AppLanguage.choose("Switch character", "切換角色"),
+            "gas": AppLanguage.choose("Gas", "油門"),
+            "brake": AppLanguage.choose("Brake and reverse", "煞車／倒車"),
+            "handbrake": AppLanguage.choose("Handbrake", "手煞車"),
+            "driveBy": AppLanguage.choose("Aim and shoot from vehicle", "車內瞄準射擊"),
+            "horn": AppLanguage.choose("Horn", "喇叭"),
+            "lookBack": AppLanguage.choose("Look behind", "向後看"),
+            "vehicleWeapon": AppLanguage.choose("Next vehicle weapon", "切換車輛武器"),
+            "dive": AppLanguage.choose("Dive", "下潛"),
+            "surface": AppLanguage.choose("Surface", "浮出水面"),
+            "airFire": AppLanguage.choose("Fire aircraft weapon", "飛行器開火"),
+            "gear": AppLanguage.choose("Landing gear", "起落架"),
+            "camera": AppLanguage.choose("Change camera", "切換視角"),
+            "phone": AppLanguage.choose("Phone", "手機"),
+            "pause": AppLanguage.choose("Pause menu", "暫停選單"),
+            "settings": AppLanguage.choose("Settings", "設定"),
+            "lights": AppLanguage.choose("Headlights", "車燈"),
+            "radio": AppLanguage.choose("Radio", "電台"),
+            "up": AppLanguage.choose("Up", "上"),
+            "down": AppLanguage.choose("Down", "下"),
+            "left": AppLanguage.choose("Left", "左"),
+            "right": AppLanguage.choose("Right", "右"),
+            "accept": AppLanguage.choose("Select", "確認"),
+            "back": AppLanguage.choose("Back", "返回"),
+            "tabLeft": AppLanguage.choose("Previous tab", "上一分頁"),
+            "tabRight": AppLanguage.choose("Next tab", "下一分頁"),
+        ]
+        for button in allButtons { if let label = labels[button.name] { button.accessibilityLabel = label } }
+        updateVisibility()
+    }
+
     private var visible: [ControlButton] = []
 
     override init(frame: CGRect) {
@@ -398,7 +441,7 @@ final class TouchControlsView: UIView {
             button.isAccessibilityElement = isShown
         }
         weapons.setIcon("weapons")
-        enter.accessibilityLabel = context == .onFoot ? "Enter vehicle" : context.flying ? "Hold to exit aircraft" : "Exit vehicle"
+        enter.accessibilityLabel = context == .onFoot ? AppLanguage.choose("Enter vehicle", "上車") : context.flying ? AppLanguage.choose("Hold to exit aircraft", "按住離開飛行器") : AppLanguage.choose("Exit vehicle", "下車")
         gas.setIcon(context == .bicycle ? "pedal" : "gas")
         setNeedsLayout()
     }
