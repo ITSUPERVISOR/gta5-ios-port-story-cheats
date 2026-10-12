@@ -194,12 +194,13 @@ u32 w2c_env_wasm_httpfs_manifest_js(struct w2c_env *host, u64 address, u32 capac
   return (u32)length;
 }
 
+extern const char *PGSelectedGameLanguage(void);
 u32 w2c_env_emscripten_asm_const_int(struct w2c_env *host, u64 code, u64 sig, u64 arguments) {
   if (code == 7980558) {
     // Emscripten's language query is the only boot-time embedded JS expression.
     u64 destinationAddress = *(u64 *)pg_pointer(host, arguments, 8);
     u32 capacity = *(u32 *)pg_pointer(host, arguments + 8, 4);
-    const char *language = "en-US";
+    const char *language = PGSelectedGameLanguage();
     if (capacity) {
       char *destination = pg_pointer(host, destinationAddress, capacity);
       snprintf(destination, capacity, "%s", language);

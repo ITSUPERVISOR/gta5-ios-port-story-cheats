@@ -10,6 +10,22 @@
 #include "NativePackedAssetCache.h"
 #include "NativeAssetPreload.h"
 
+// A language choice requested by the native app when the WASM engine boots.
+// This does not guarantee the underlying web game uses the locale or has the necessary fonts.
+const char *PGSelectedGameLanguage(void) {
+  NSString *chosen = [[NSUserDefaults standardUserDefaults] stringForKey:@"gtaPortAppLanguage"];
+  static const char *supported[] = {
+    "en-US", "fr-FR", "it-IT", "de-DE", "es-ES", "ja-JP", "ko-KR",
+    "pl-PL", "pt-BR", "ru-RU", "zh-CN", "es-MX", "zh-TW"
+  };
+  if (chosen != nil) {
+    for (size_t i = 0; i < sizeof(supported)/sizeof(supported[0]); ++i) {
+      if ([chosen isEqualToString:[NSString stringWithUTF8String:supported[i]]]) return supported[i];
+    }
+  }
+  return "en-US";
+}
+
 // The server that holds your own copy of the game files (set in the app).
 static NSString *assetServer=@"";
 void PGSetAssetServer(const char *url){
