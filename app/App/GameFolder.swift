@@ -3,16 +3,29 @@ import Foundation
 /// Where your own copy of the game lives on this iPhone. Two ways:
 /// - In the app's own folder (Files › On My iPhone › GTA V Port): found automatically, at any
 ///   depth, with no picking and no permissions. Moving a folder within On My iPhone is instant.
-/// - A folder picked in Files: kept between launches with a bookmark.
-/// Either way the app reads the files directly while you play, so no server is needed.
+/// - A folder picked in Files, which can be any folder above the game (even On My iPhone itself):
+///   the app looks through it for the game and keeps access between launches with a bookmark.
+/// Either way every game file is checked first (GameFiles), and the app reads the files directly
+/// while you play, so no server is needed.
 enum GameFolder {
     private static let bookmarkKey = "gameFolderBookmark"
     private static let nameKey = "gameFolderName"
     private static let subpathKey = "gameFolderSubpath" // from the picked folder (or the app folder) down to data/
     private static let inAppKey = "gameFolderInApp"
+    /// "Play anyway": the folder (subpath) and how many problems the player accepted for it.
+    private static let acceptedKey = "gameFolderAcceptedProblems"
+    /// The last folder picked in Files that had problems, so the player can still use it.
+    private static var pendingPick: (url: URL, report: GameFiles.Report)?
     private static var accessing: URL?
     /// Lines for the app's log (Settings › Share log), so a refused folder can be diagnosed.
     static var log: (String) -> Void = { _ in }
+    /// The check of a game folder found in the app's folder that can't be used yet (shown on the start screen).
+    static private(set) var appFolderReport: GameFiles.Report?
+    static var appFolderProblem: String? { appFolderReport.map { $0.explanation.message } }
+    /// Problem files in the folder in use, when the player chose Play anyway (0: all files fine).
+    static private(set) var acceptedProblemCount = 0
+    /// Game archives (zip, rar, 7z) seen by the last look, which the app can unpack.
+    static private(set) var archivesFound: [URL] = []
 
     static var isChosen: Bool { inAppFolder || UserDefaults.standard.data(forKey: bookmarkKey) != nil }
     static var inAppFolder: Bool { UserDefaults.standard.bool(forKey: inAppKey) }
@@ -25,54 +38,114 @@ enum GameFolder {
 
     // MARK: The app's own folder
 
-    /// Looks for the game inside Files › On My iPhone › GTA V Port. Returns true when it was found
-    /// and checked (and remembers it). Does nothing when a picked folder is already in use.
+    /// Looks for the game anywhere inside Files › On My iPhone › GTA V Port and checks every file.
+    /// Returns true when a complete game was found (and remembers it). Does nothing when a picked
+    /// folder is already in use. Takes about a second.
     @discardableResult
     static func findInAppFolder() -> Bool {
         if isChosen && !inAppFolder { return false }
-        guard let data = findData(in: appFolder, depth: 4) else {
-            if inAppFolder { log(AppLanguage.choose("The game folder is no longer in the app's folder.", "App 資料夾中已找不到遊戲資料。")); clear() }
+        let previous = appFolderReport?.explanation.message
+        appFolderReport = nil
+        let scan = GameFiles.scan(appFolder)
+        archivesFound = scan.archives
+        guard let best = scan.best else {
+            if inAppFolder { log("The game folder is no longer in the app's folder."); clear() }
             return false
         }
-        if let problem = check(data) {
-            log("Game folder in the app's folder refused (\(relative(data, to: appFolder))): \(problem)")
+        let subpath = relative(best.data, to: appFolder)
+        guard best.isComplete || accepted(best, subpath: subpath) else {
+            if previous != best.explanation.message {
+                log("Game folder in the app's folder can't be used (\(subpath)): \(best.problems.count) problems")
+                log(best.details.split(separator: "\n").prefix(20).joined(separator: "\n"))
+            }
+            appFolderReport = best
+            if inAppFolder { clear() }
             return false
         }
-        let subpath = relative(data, to: appFolder)
+        acceptedProblemCount = best.problems.count
         if !inAppFolder || UserDefaults.standard.string(forKey: subpathKey) != subpath {
-            log("Game folder found in the app's folder: \(subpath)")
+            log("Game folder found in the app's folder: \(subpath) (\(best.isComplete ? "all \(best.fileCount) files checked" : "\(best.problems.count) problem files, played anyway"))")
         }
         UserDefaults.standard.removeObject(forKey: bookmarkKey)
         UserDefaults.standard.set(true, forKey: inAppKey)
         UserDefaults.standard.set(subpath, forKey: subpathKey)
-        UserDefaults.standard.set(data.deletingLastPathComponent().lastPathComponent, forKey: nameKey)
+        UserDefaults.standard.set(displayName(best.data), forKey: nameKey)
         return true
     }
 
     // MARK: A folder picked in Files
 
-    /// Checks a folder picked in Files and remembers it. Returns a message if it is not usable.
-    static func choose(_ picked: URL) -> String? {
+    /// What happened with a picked folder.
+    enum Choice {
+        case accepted(GameFiles.Report)
+        case incomplete(GameFiles.Report)
+        case archivesOnly([URL])
+        case refused(String)
+    }
+
+    /// Looks through a folder picked in Files (any folder above the game, even On My iPhone itself),
+    /// checks the best game folder in it and remembers it when it's complete.
+    static func choose(_ picked: URL) -> Choice {
         // Folders picked in Files need security-scoped access; plain paths (tests) don't.
         let scoped = picked.startAccessingSecurityScopedResource()
         defer { if scoped { picked.stopAccessingSecurityScopedResource() } }
         log("Folder picked: \(picked.path) (access granted: \(scoped), \(describeLocation(picked)))")
         guard FileManager.default.isReadableFile(atPath: picked.path) else {
-            return AppLanguage.choose("The app was not allowed to open that folder. Move your game folder to Files › On My iPhone › GTA V Port instead; the app finds it there by itself.", "App 沒有權限讀取此資料夾。請改移到「檔案 › 我的 iPhone › GTA V Port」，App 便能自動偵測。")
+            return .refused("The app was not allowed to open that folder. Move your game folder to Files › On My iPhone › GTA V Port instead; the app finds it there by itself.")
         }
-        guard let data = findData(in: picked, depth: 4) else { return wrongFolderMessage(picked) }
-        if let problem = check(data) { return problem }
+        let scan = GameFiles.scan(picked)
+        archivesFound = scan.archives
+        guard let best = scan.best else {
+            if !scan.archives.isEmpty { log("No unpacked game in the picked folder; archives: \(scan.archives.map(\.lastPathComponent))"); return .archivesOnly(scan.archives) }
+            return .refused(wrongFolderMessage(picked))
+        }
+        let subpath = relative(best.data, to: picked)
+        guard best.isComplete || accepted(best, subpath: subpath) else {
+            pendingPick = (picked, best)
+            log("Picked game folder can't be used (\(subpath.isEmpty ? "the picked folder" : subpath)): \(best.problems.count) problems")
+            log(best.details.split(separator: "\n").prefix(20).joined(separator: "\n"))
+            return .incomplete(best)
+        }
         do {
             let bookmark = try picked.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil)
             UserDefaults.standard.set(bookmark, forKey: bookmarkKey)
             UserDefaults.standard.set(false, forKey: inAppKey)
-            UserDefaults.standard.set(relative(data, to: picked), forKey: subpathKey)
-            UserDefaults.standard.set(data == picked ? picked.lastPathComponent : data.deletingLastPathComponent().lastPathComponent, forKey: nameKey)
-            log("Game folder accepted: data at \(relative(data, to: picked).isEmpty ? "(the picked folder)" : relative(data, to: picked))")
-            return nil
+            UserDefaults.standard.set(subpath, forKey: subpathKey)
+            UserDefaults.standard.set(displayName(best.data), forKey: nameKey)
+            acceptedProblemCount = best.problems.count
+            log("Game folder accepted: data at \(subpath.isEmpty ? "(the picked folder)" : subpath), all \(best.fileCount) files checked")
+            return .accepted(best)
         } catch {
-            return AppLanguage.choose("The app could not remember that folder: \(error.localizedDescription)", "無法儲存資料夾位置：\(error.localizedDescription)")
+            return .refused("The app could not remember that folder: \(error.localizedDescription)")
         }
+    }
+
+    // MARK: Play anyway
+
+    /// A folder with a few damaged or missing files can still be used, at the player's risk: the
+    /// game may crash where it needs them. Not for iCloud-only files, which can't be read at all.
+    static func playAnywayAllowed(_ report: GameFiles.Report) -> Bool {
+        !report.isComplete && report.inICloud.isEmpty && report.problems.count <= 20
+    }
+    private static func accepted(_ report: GameFiles.Report, subpath: String) -> Bool {
+        guard let saved = UserDefaults.standard.string(forKey: acceptedKey) else { return false }
+        let parts = saved.split(separator: "\u{1}", maxSplits: 1).map(String.init)
+        return parts.count == 2 && parts[1] == subpath && report.problems.count <= Int(parts[0]) ?? 0 && playAnywayAllowed(report)
+    }
+    /// Uses the folder that was just refused (in the app's folder, or the last one picked) anyway.
+    @discardableResult
+    static func playAnyway(_ report: GameFiles.Report) -> Bool {
+        guard playAnywayAllowed(report) else { return false }
+        if let pick = pendingPick, pick.report.data == report.data {
+            let subpath = relative(report.data, to: pick.url)
+            UserDefaults.standard.set("\(report.problems.count)\u{1}\(subpath)", forKey: acceptedKey)
+            if case .accepted = choose(pick.url) { pendingPick = nil; return true }
+            return false
+        }
+        let subpath = relative(report.data, to: appFolder)
+        UserDefaults.standard.set("\(report.problems.count)\u{1}\(subpath)", forKey: acceptedKey)
+        log("Playing anyway with \(report.problems.count) problem files in \(subpath)")
+        return findInAppFolder()
     }
 
     /// The chosen game's data/ folder, with access granted for the rest of this launch.
@@ -80,7 +153,7 @@ enum GameFolder {
         let subpath = UserDefaults.standard.string(forKey: subpathKey) ?? ""
         if inAppFolder {
             let data = subpath.isEmpty ? appFolder : appFolder.appendingPathComponent(subpath)
-            return FileManager.default.fileExists(atPath: data.appendingPathComponent("manifest.json").path) ? data : nil
+            return GameFiles.gameData(at: data) == data ? data : nil
         }
         guard let bookmark = UserDefaults.standard.data(forKey: bookmarkKey) else { return nil }
         var stale = false
@@ -91,78 +164,33 @@ enum GameFolder {
             UserDefaults.standard.set(fresh, forKey: bookmarkKey)
         }
         // Folders remembered by older versions have no subpath: look again.
-        let data = subpath.isEmpty ? (findData(in: root, depth: 4) ?? root) : root.appendingPathComponent(subpath)
-        return FileManager.default.fileExists(atPath: data.appendingPathComponent("manifest.json").path) ? data : nil
+        let data = subpath.isEmpty ? (GameFiles.scan(root, depth: 4).best?.data ?? root) : root.appendingPathComponent(subpath)
+        return GameFiles.gameData(at: data) == data ? data : nil
     }
 
-    // MARK: Finding and checking
-
-    /// The game's data/ folder inside `folder` (or `folder` itself), up to `depth` levels down.
-    /// It is the folder with manifest.json next to x64 or common.
-    private static func findData(in folder: URL, depth: Int) -> URL? {
-        let manager = FileManager.default
-        func isData(_ url: URL) -> Bool {
-            manager.fileExists(atPath: url.appendingPathComponent("manifest.json").path)
-                && (directoryExists(url.appendingPathComponent("x64")) || directoryExists(url.appendingPathComponent("common")))
-        }
-        var level = [folder]
-        for _ in 0...depth {
-            var next: [URL] = []
-            // A folder named data comes first, so a whole game folder wins over stray copies.
-            for candidate in level {
-                if isData(candidate.appendingPathComponent("data")) { return candidate.appendingPathComponent("data") }
-                if isData(candidate) { return candidate }
-            }
-            for candidate in level {
-                let children = (try? manager.contentsOfDirectory(at: candidate, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])) ?? []
-                next += children.filter { directoryExists($0) && !["EngineFiles", "b", "x64", "common", "__MACOSX"].contains($0.lastPathComponent) }
-            }
-            if next.isEmpty { break }
-            level = Array(next.prefix(200))
-        }
-        return nil
+    /// Checks every file of the game in use (Settings › Check game files).
+    static func checkChosen() -> GameFiles.Report? {
+        guard let data = open() else { return nil }
+        return GameFiles.check(data)
     }
 
-    /// Explains what to pick instead when the picked folder has no game data in it.
+    // MARK: Helpers
+
+    /// Explains what to pick instead when the picked folder has no game in it.
     private static func wrongFolderMessage(_ picked: URL) -> String {
         let name = picked.lastPathComponent
         let manager = FileManager.default
         let hasEngine = manager.fileExists(atPath: picked.appendingPathComponent("game.wasm").path)
             || manager.fileExists(atPath: picked.appendingPathComponent("8b0b5899ed/game.wasm").path)
         if name == "b" || name == "8b0b5899ed" || name == "shaders" || hasEngine {
-            return AppLanguage.choose("You opened the \"\(name)\" folder. Go back up one or two levels and pick the folder that has both \"data\" and \"b\" inside, then tap Open there.", "你開啟的是「\(name)」資料夾。請返回上一層或上兩層，選擇同時包含「data」和「b」的資料夾，再按「開啟」。")
+            return AppLanguage.interpolate(AppLanguage.choose("You opened the \"{arg0}\" folder. Go back up one or two levels and pick the folder that has both \"data\" and \"b\" inside, then tap Open there."), [String(describing: name)])
         }
-        return AppLanguage.choose("There is no game in \"\(name)\". Pick the folder that has both \"data\" and \"b\" inside (or any folder above it).\n\nEasiest: move your game folder into Files › On My iPhone › GTA V Port. The app finds it there by itself.", "「\(name)」中找不到遊戲。請選擇包含「data」與「b」的資料夾，或其上層資料夾。\n\n建議將整個遊戲資料夾移至「檔案 › 我的 iPhone › GTA V Port」，App 會自動偵測。")
+        return "There is no game in \"\(name)\". Pick the folder that has your game in it (any folder above it works, even On My iPhone itself).\n\nEasiest: move your game folder into Files › On My iPhone › GTA V Port. The app finds it there by itself."
     }
 
-    /// Compares a sample of files (the first ones, the biggest ones) with the game's file list.
-    private static func check(_ data: URL) -> String? {
-        guard let path = EnginePaths.manifest,
-              let json = try? JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: path))) as? [String: Any],
-              let files = json["files"] as? [[Any]] else { return AppLanguage.choose("The app's game file list is missing.", "App 缺少遊戲檔案清單。") }
-        let entries = files.compactMap { entry -> (String, UInt64)? in
-            guard entry.count >= 2, let name = entry[0] as? String, let size = (entry[1] as? NSNumber)?.uint64Value else { return nil }
-            return (name, size)
-        }
-        let sample = Array(entries.prefix(5)) + Array(entries.sorted { $0.1 > $1.1 }.prefix(5))
-        for (name, size) in sample {
-            let file = data.appendingPathComponent(name)
-            if !FileManager.default.fileExists(atPath: file.path) {
-                let cloud = file.deletingLastPathComponent().appendingPathComponent("." + file.lastPathComponent + ".icloud")
-                if FileManager.default.fileExists(atPath: cloud.path) {
-                    return AppLanguage.choose("Some game files are only in iCloud, not on this iPhone. Move the game folder to Files › On My iPhone › GTA V Port and try again.", "部分遊戲檔案仍在 iCloud，尚未下載到此 iPhone。請移至「檔案 › 我的 iPhone › GTA V Port」後重試。")
-                }
-                return AppLanguage.choose("The folder is missing game files (for example \(name)). Is the download or unpacking complete?", "資料夾缺少遊戲檔案（例如 \(name)）。請確認是否已下載或解壓縮完成。")
-            }
-            let actual = (try? FileManager.default.attributesOfItem(atPath: file.path)[.size] as? NSNumber)?.uint64Value ?? 0
-            if actual != size { return AppLanguage.choose("\(name) has a different size than the game expects. The folder may be incomplete or from another version.", "\(name) 的大小與遊戲預期不同，可能資料不完整或版本不符。") }
-        }
-        return nil
-    }
-
-    private static func directoryExists(_ url: URL) -> Bool {
-        var isDirectory: ObjCBool = false
-        return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) && isDirectory.boolValue
+    /// The name shown for a game folder: the folder holding data/, or data/'s own name.
+    private static func displayName(_ data: URL) -> String {
+        data.lastPathComponent == "data" ? data.deletingLastPathComponent().lastPathComponent : data.lastPathComponent
     }
     private static func relative(_ url: URL, to base: URL) -> String {
         let full = url.standardizedFileURL.path, root = base.standardizedFileURL.path

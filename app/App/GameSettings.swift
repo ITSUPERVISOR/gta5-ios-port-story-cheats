@@ -6,11 +6,11 @@ enum GameMode: Int, CaseIterable {
     case story = 1
     case sandbox = 2
 
-    var title: String { self == .story ? AppLanguage.choose("Story mode", "劇情模式") : AppLanguage.choose("Sandbox", "沙盒模式") }
+    var title: String { self == .story ? AppLanguage.choose("Story mode") : AppLanguage.choose("Sandbox") }
     var detail: String {
         switch self {
-        case .story: return AppLanguage.choose("The campaign with missions. Continues your latest save, or starts from the Prologue.", "遊玩完整劇情與任務，繼續上次存檔，或從序章開始。")
-        case .sandbox: return AppLanguage.choose("Free roam anywhere on the map with every weapon. No missions.", "自由探索整張地圖，使用所有武器，不進行劇情任務。")
+        case .story: return AppLanguage.choose("The campaign with missions. Continues your latest save, or starts from the Prologue.")
+        case .sandbox: return AppLanguage.choose("Free roam anywhere on the map with every weapon. No missions.")
         }
     }
 }
@@ -83,9 +83,15 @@ final class GameSettings {
         get { defaults.object(forKey: "targetingMode") as? Int ?? 1 }
         set { defaults.set(newValue, forKey: "targetingMode") }
     }
-    static var targetingTitles: [String] { [AppLanguage.choose("Traditional lock-on", "傳統鎖定"), AppLanguage.choose("Assisted aim", "輔助瞄準"), AppLanguage.choose("Assisted free aim", "輔助自由瞄準"), AppLanguage.choose("Free aim", "自由瞄準")] }
+    static var targetingTitles: [String] { [AppLanguage.choose("Traditional lock-on"), AppLanguage.choose("Assisted aim"), AppLanguage.choose("Assisted free aim"), AppLanguage.choose("Free aim")] }
 
     /// nil until the player has chosen on the launch screen.
+    /// Sandbox map: 0 the GTA V map, 1 the test level the game files include (env_test).
+    var sandboxMap: Int {
+        get { defaults.integer(forKey: "sandboxMap") == 1 ? 1 : 0 }
+        set { defaults.set(newValue == 1 ? 1 : 0, forKey: "sandboxMap") }
+    }
+    static var sandboxMapTitles: [String] { ["GTA V", AppLanguage.choose("GTA VI test map")] }
     var gameModeChoice: GameMode? {
         get { (defaults.object(forKey: "gameMode") as? Int).flatMap(GameMode.init) }
         set { defaults.set(newValue?.rawValue, forKey: "gameMode") }
@@ -117,6 +123,11 @@ final class GameSettings {
         get { defaults.object(forKey: "matchScreenShape") as? Bool ?? true }
         set { defaults.set(newValue, forKey: "matchScreenShape") }
     }
+    /// A hardware keyboard and mouse play through the game's own PC controls (on by default).
+    var keyboardMouse: Bool {
+        get { defaults.object(forKey: "keyboardMouse") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: "keyboardMouse") }
+    }
     /// Hide the touch controls while a game controller is connected (on by default).
     var hideTouchWithController: Bool {
         get { defaults.object(forKey: "hideTouchWithController") as? Bool ?? true }
@@ -131,7 +142,7 @@ final class GameSettings {
         }
         set { defaults.set(newValue, forKey: "frameRateCap") }
     }
-    static func frameRateTitle(_ cap: Int) -> String { cap == 0 ? AppLanguage.choose("Unlocked", "不限制") : "\(cap) FPS" }
+    static func frameRateTitle(_ cap: Int) -> String { cap == 0 ? AppLanguage.choose("Unlocked") : "\(cap) FPS" }
 
     // Crash fallback: a launch that never reached a stable world is treated
     // as a memory kill, and the last preset that worked is restored.

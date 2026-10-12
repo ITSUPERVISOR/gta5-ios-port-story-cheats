@@ -8,13 +8,13 @@ import os
 enum GraphicsPreset: Int, CaseIterable {
     case battery, performance, balanced, quality, ultra, max
 
-    var title: String { [AppLanguage.choose("Battery", "省電"), AppLanguage.choose("Performance", "效能"), AppLanguage.choose("Balanced", "平衡"), AppLanguage.choose("Quality", "高畫質"), AppLanguage.choose("Ultra", "極高"), AppLanguage.choose("Max", "最高")][rawValue] }
+    var title: String { [AppLanguage.choose("Battery"), AppLanguage.choose("Performance"), AppLanguage.choose("Balanced"), AppLanguage.choose("Quality"), AppLanguage.choose("Ultra"), AppLanguage.choose("Max")][rawValue] }
     /// Render height in pixels; width follows the screen's shape.
     var height: Int { [432, 540, 720, 900, 1080, 1290][rawValue] }
     var detail: String {
-        [AppLanguage.choose("Lowest load, longest play time", "最低負載，延長遊玩時間"), AppLanguage.choose("Today's tested setup for 6 GB iPhones", "適合 6GB 記憶體 iPhone 的測試配置"), AppLanguage.choose("Sharper image and shadows", "更清晰的畫面和陰影"),
-         AppLanguage.choose("Higher detail textures, effects and draw distance", "更細緻的材質、特效與可視距離"), AppLanguage.choose("1080p with high shaders, shadows and reflections", "1080p、高階著色器、陰影與反射"),
-         AppLanguage.choose("Near-native resolution, high textures and full draw distance (newest Pro phones)", "接近原生解析度、高品質材質與完整可視距離（新款 Pro 機型）")][rawValue]
+        [AppLanguage.choose("Lowest load, longest play time"), AppLanguage.choose("Today's tested setup for 6 GB iPhones"), AppLanguage.choose("Sharper image and shadows"),
+         AppLanguage.choose("Higher detail textures, effects and draw distance"), AppLanguage.choose("1080p with high shaders, shadows and reflections"),
+         AppLanguage.choose("Near-native resolution, high textures and full draw distance (newest Pro phones)")][rawValue]
     }
 
     /// Engine command-line options. Shader quality never goes below 1 (the

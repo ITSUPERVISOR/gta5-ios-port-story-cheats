@@ -27,7 +27,7 @@ final class SettingsViewController: UITableViewController {
         self.runningMode = engineRunning ? runningMode : nil
         self.bootPreset = GameSettings.shared.graphicsPreset
         super.init(style: .insetGrouped)
-        title = AppLanguage.choose("Settings", "設定")
+        title = AppLanguage.choose("Settings")
         modalPresentationStyle = .formSheet
         overrideUserInterfaceStyle = .dark
     }
@@ -35,8 +35,11 @@ final class SettingsViewController: UITableViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        navigationItem.rightBarButtonItem = UIBarButtonItem(title: AppLanguage.choose("Done", "完成"), primaryAction: UIAction { [weak self] _ in self?.dismiss(animated: true) })
+        navigationItem.rightBarButtonItem = UIBarButtonItem(title: AppLanguage.choose("Done"), primaryAction: UIAction { [weak self] _ in self?.dismiss(animated: true) })
+        navigationItem.rightBarButtonItem?.tintColor = Theme.accent
         tableView.register(UITableViewCell.self, forCellReuseIdentifier: "cell")
+        tableView.backgroundView = Theme.dimmedBackdrop(image: "SettingsBackground")
+        tableView.separatorColor = UIColor(white: 1, alpha: 0.1)
         fileRows = makeFileRows()
         NotificationCenter.default.addObserver(self, selector: #selector(preloadChanged), name: .assetPreloadChanged, object: nil)
         preloader.refresh()
@@ -52,11 +55,31 @@ final class SettingsViewController: UITableViewController {
 
     override func numberOfSections(in tableView: UITableView) -> Int { Section.allCases.count }
 
+    // The app's look: rows as glass on the darkened art, headers in the display font.
+    override func tableView(_ tableView: UITableView, willDisplay cell: UITableViewCell, forRowAt indexPath: IndexPath) {
+        cell.backgroundColor = Theme.rowBackground
+        let selected = UIView()
+        selected.backgroundColor = Theme.rowSelected
+        cell.selectedBackgroundView = selected
+    }
+    override func tableView(_ tableView: UITableView, willDisplayHeaderView view: UIView, forSection section: Int) {
+        guard let header = view as? UITableViewHeaderFooterView else { return }
+        var content = header.defaultContentConfiguration()
+        content.text = self.tableView(tableView, titleForHeaderInSection: section)
+        content.textProperties.font = Theme.display(15, .bold)
+        content.textProperties.color = Theme.text
+        content.textProperties.transform = .uppercase
+        header.contentConfiguration = content
+    }
+    override func tableView(_ tableView: UITableView, willDisplayFooterView view: UIView, forSection section: Int) {
+        (view as? UITableViewHeaderFooterView)?.textLabel?.textColor = Theme.tertiaryText
+    }
+
     override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
         switch Section(rawValue: section)! {
-        case .mode: return GameMode.allCases.count
+        case .mode: return GameMode.allCases.count + (settings.gameModeChoice == .sandbox ? 1 : 0)
         case .graphics: return settings.tier.allowed.count + 3
-        case .controls: return 8
+        case .controls: return 10
         case .gyro: return (settings.gyroAim == .off ? 1 : 3) + (settings.tiltSteer == .off ? 1 : 2)
         case .files: return fileRows.count
         case .device: return 3
@@ -65,32 +88,32 @@ final class SettingsViewController: UITableViewController {
     }
 
     override func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
-        [AppLanguage.choose("Language", "語言"), AppLanguage.choose("Game mode", "遊戲模式"), AppLanguage.choose("Graphics", "畫質"), AppLanguage.choose("Touch controls", "觸控按鍵"), AppLanguage.choose("Gyro", "陀螺儀"), AppLanguage.choose("Game files", "遊戲資料"), AppLanguage.choose("This device", "此裝置")][section]
+        [AppLanguage.choose("Language"), AppLanguage.choose("Game mode"), AppLanguage.choose("Graphics"), AppLanguage.choose("Touch controls"), AppLanguage.choose("Gyro"), AppLanguage.choose("Game files"), AppLanguage.choose("This device")][section]
     }
 
     override func tableView(_ tableView: UITableView, titleForFooterInSection section: Int) -> String? {
         switch Section(rawValue: section)! {
         case .mode:
-            var text = AppLanguage.choose("Story mode saves stay on this phone between launches. Sandbox keeps its own separate files.", "劇情存檔會保留在這支手機；沙盒模式使用獨立的存檔。")
+            var text = AppLanguage.choose("Story mode saves stay on this phone between launches. Sandbox keeps its own separate files.")
             if let runningMode {
-                text = AppLanguage.choose("Changes apply the next time you start the game. ", "變更會在下次啟動遊戲時生效。") + text
-                if settings.gameMode != runningMode { text += AppLanguage.choose(" Close and reopen the app to play \(settings.gameMode.title).", " 關閉再重新開啟 App，即可進入 \(settings.gameMode.title)。") }
+                text = AppLanguage.choose("Changes apply the next time you start the game. ") + text
+                if settings.gameMode != runningMode { text += AppLanguage.interpolate(AppLanguage.choose(" Close and reopen the app to play {arg0}."), [String(describing: settings.gameMode.title)]) }
             }
             return text
         case .graphics:
-            var text = AppLanguage.choose("Resolution changes apply right away. ", "解析度變更會立即生效。")
-            text += engineRunning ? AppLanguage.choose("Preset and frame rate changes apply the next time you start the game.", "畫質預設與幀率會在下次啟動遊戲時生效。") : AppLanguage.choose("Presets apply when you press Play.", "按下「開始遊戲」後套用畫質預設。")
-            if settings.graphicsPreset != bootPreset && engineRunning { text += AppLanguage.choose(" Restart needed for \(settings.graphicsPreset.title).", " 必須重新啟動才能套用「\(settings.graphicsPreset.title)」。") }
-            if settings.tier.risky(settings.graphicsPreset) { text += AppLanguage.choose(" Presets above the recommended one can run out of memory or overheat on this phone; if a launch fails, the game falls back automatically.", " 高於建議的畫質可能導致記憶體不足或裝置過熱；若無法啟動，將自動降低設定。") }
+            var text = AppLanguage.choose("Resolution changes apply right away. ")
+            text += engineRunning ? AppLanguage.choose("Preset and frame rate changes apply the next time you start the game.") : AppLanguage.choose("Presets apply when you press Play.")
+            if settings.graphicsPreset != bootPreset && engineRunning { text += AppLanguage.interpolate(AppLanguage.choose(" Restart needed for {arg0}."), [String(describing: settings.graphicsPreset.title)]) }
+            if settings.tier.risky(settings.graphicsPreset) { text += AppLanguage.choose(" Presets above the recommended one can run out of memory or overheat on this phone; if a launch fails, the game falls back automatically.") }
             return text
         case .controls:
-            return AppLanguage.choose("Controls act as a game controller, so the game's own aim assist and analog steering work. Assisted aim locks onto targets like on a console.", "觸控按鍵會模擬遊戲控制器，因此能使用遊戲原有的輔助瞄準和類比轉向。")
+            return AppLanguage.choose("Controls act as a game controller, so the game's own aim assist and analog steering work. Assisted aim locks onto targets like on a console.")
         case .gyro:
-            return AppLanguage.choose("Move the phone to fine-tune your aim; turning your body turns the camera. Tilt steering turns the phone like a steering wheel: Assist adds fine control on top of the touch steering, Tilt to steer replaces it. The straight-ahead angle is however you hold the phone when you get in.", "移動手機可微調瞄準。傾斜轉向能把手機當方向盤：「輔助」會配合觸控轉向；「傾斜控制」則改用手機傾斜操作。上車時的持機角度會設定為正前方。")
+            return AppLanguage.choose("Move the phone to fine-tune your aim; turning your body turns the camera. Tilt steering turns the phone like a steering wheel: Assist adds fine control on top of the touch steering, Tilt to steer replaces it. The straight-ahead angle is however you hold the phone when you get in.")
         case .files: return filesFooter()
         case .device: return nil
         case .language:
-            return AppLanguage.choose("Menu language changes now. In-game language is only requested at next launch and may remain English if the WebAssembly game does not support it.", "App 介面語言立即切換；遊戲內語言會在下次啟動時嘗試套用，但網頁遊戲引擎仍可能顯示英文。")
+            return AppLanguage.choose("Menu language changes now. In-game language is only requested at next launch and may remain English if the WebAssembly game does not support it.")
         }
     }
 
@@ -101,28 +124,45 @@ final class SettingsViewController: UITableViewController {
         content.secondaryTextProperties.color = .secondaryLabel
         let presets = settings.tier.allowed
         switch Section(rawValue: indexPath.section)! {
+        case .mode where indexPath.row == GameMode.allCases.count:
+            // Sandbox only: which map.
+            content.text = AppLanguage.choose("Sandbox map")
+            content.secondaryText = settings.sandboxMap == 1 ? AppLanguage.choose("The test level that comes with the game files") : AppLanguage.choose("The full GTA V map")
+            let button = UIButton(configuration: .gray())
+            button.configuration?.title = GameSettings.sandboxMapTitles[settings.sandboxMap]
+            button.menu = UIMenu(children: GameSettings.sandboxMapTitles.enumerated().map { index, title in
+                UIAction(title: title, state: index == settings.sandboxMap ? .on : .off) { [weak self] _ in
+                    self?.settings.sandboxMap = index
+                    self?.gameModeChanged?()
+                    UIView.performWithoutAnimation { self?.tableView.reloadSections([Section.mode.rawValue], with: .none) }
+                }
+            })
+            button.showsMenuAsPrimaryAction = true
+            button.sizeToFit()
+            cell.accessoryView = button
+            cell.selectionStyle = .none
         case .mode:
             let mode = GameMode.allCases[indexPath.row]
-            content.text = mode.title + (mode == runningMode ? AppLanguage.choose(" (playing now)", "（目前遊玩中）") : "")
+            content.text = mode.title + (mode == runningMode ? AppLanguage.choose(" (playing now)") : "")
             content.secondaryText = mode.detail
             cell.accessoryType = settings.gameModeChoice == mode ? .checkmark : .none
         case .graphics:
             if indexPath.row < presets.count {
                 let preset = presets[indexPath.row]
-                content.text = preset.title + (preset == settings.tier.recommended ? AppLanguage.choose(" (recommended)", "（建議）") : "")
-                content.secondaryText = AppLanguage.choose("Detail level, default \(preset.height)p · ", "畫質等級，預設 \(preset.height)p · ") + preset.detail + (settings.tier.risky(preset) ? AppLanguage.choose("\n⚠︎ Heavier than this phone's recommended setting: may run out of memory or overheat.", "\n⚠︎ 高於此裝置的建議設定，可能記憶體不足或過熱。") : "")
+                content.text = preset.title + (preset == settings.tier.recommended ? AppLanguage.choose(" (recommended)") : "")
+                content.secondaryText = AppLanguage.interpolate(AppLanguage.choose("Detail level, default {arg0}p · "), [String(describing: preset.height)]) + preset.detail + (settings.tier.risky(preset) ? AppLanguage.choose("\n⚠︎ Heavier than this phone's recommended setting: may run out of memory or overheat.") : "")
                 if settings.tier.risky(preset) { content.secondaryTextProperties.color = .systemOrange }
                 cell.accessoryType = preset == settings.graphicsPreset ? .checkmark : .none
             } else {
                 let row = indexPath.row - presets.count
                 cell.selectionStyle = .none
                 if row == 0 {
-                    content.text = AppLanguage.choose("Resolution", "解析度")
-                    content.secondaryText = currentSizeText() + AppLanguage.choose(" · changes right away", " · 立即生效")
+                    content.text = AppLanguage.choose("Resolution")
+                    content.secondaryText = currentSizeText() + AppLanguage.choose(" · changes right away")
                     let button = UIButton(type: .system)
                     button.setTitle(resolutionTitle(settings.renderHeight) + " ▾", for: .normal)
                     button.showsMenuAsPrimaryAction = true
-                    button.accessibilityLabel = AppLanguage.choose("Resolution", "解析度")
+                    button.accessibilityLabel = AppLanguage.choose("Resolution")
                     let choices = [0] + GraphicsConfiguration.resolutionChoices
                     button.menu = UIMenu(children: choices.map { height in
                         UIAction(title: resolutionTitle(height), state: height == settings.renderHeight ? .on : .off) { [weak self] _ in
@@ -135,18 +175,18 @@ final class SettingsViewController: UITableViewController {
                     button.sizeToFit()
                     cell.accessoryView = button
                 } else if row == 1 {
-                    content.text = AppLanguage.choose("Fill the screen", "填滿螢幕")
-                    content.secondaryText = AppLanguage.choose("Render at the screen's shape instead of stretching 16:9", "依照螢幕比例渲染，不再拉伸 16:9 畫面")
-                    cell.accessoryView = toggle(settings.matchScreenShape, label: AppLanguage.choose("Fill the screen", "填滿螢幕")) { [weak self] in
+                    content.text = AppLanguage.choose("Fill the screen")
+                    content.secondaryText = AppLanguage.choose("Render at the screen's shape instead of stretching 16:9")
+                    cell.accessoryView = toggle(settings.matchScreenShape, label: AppLanguage.choose("Fill the screen")) { [weak self] in
                         self?.settings.matchScreenShape = $0; self?.resolutionChanged?(); self?.tableView.reloadData()
                     }
                 } else {
-                    content.text = AppLanguage.choose("Frame rate", "幀率")
-                    content.secondaryText = AppLanguage.choose("Higher uses more power and heat; 30 FPS is steadiest. Unlocked goes up to 120 on ProMotion iPhones.", "幀率愈高愈耗電、愈容易發熱；30 FPS 最穩定。ProMotion iPhone 解除限制後最高可達 120 FPS。")
+                    content.text = AppLanguage.choose("Frame rate")
+                    content.secondaryText = AppLanguage.choose("Higher uses more power and heat; 30 FPS is steadiest. Unlocked goes up to 120 on ProMotion iPhones.")
                     let button = UIButton(type: .system)
                     button.setTitle(GameSettings.frameRateTitle(settings.frameRateCap) + " ▾", for: .normal)
                     button.showsMenuAsPrimaryAction = true
-                    button.accessibilityLabel = AppLanguage.choose("Frame rate", "幀率")
+                    button.accessibilityLabel = AppLanguage.choose("Frame rate")
                     button.menu = UIMenu(children: [30, 60, 0].map { cap in
                         UIAction(title: GameSettings.frameRateTitle(cap), state: cap == settings.frameRateCap ? .on : .off) { [weak self] _ in
                             self?.settings.frameRateCap = cap; self?.reloadFooters(); self?.tableView.reloadData()
@@ -160,53 +200,60 @@ final class SettingsViewController: UITableViewController {
             cell.selectionStyle = .none
             switch indexPath.row {
             case 0:
-                cell.accessoryView = slider(settings.lookSensitivity, 0.3, 3, label: AppLanguage.choose("Look speed", "鏡頭速度")) { [weak self] in self?.settings.lookSensitivity = $0 }
-                content.text = AppLanguage.choose("Camera stick speed", "鏡頭搖桿速度")
+                cell.accessoryView = slider(settings.lookSensitivity, 0.3, 3, label: AppLanguage.choose("Look speed")) { [weak self] in self?.settings.lookSensitivity = $0 }
+                content.text = AppLanguage.choose("Camera stick speed")
             case 5:
-                cell.accessoryView = slider(settings.aimSensitivity, 0.3, 4, label: AppLanguage.choose("Aim look speed", "瞄準鏡頭速度")) { [weak self] in self?.settings.aimSensitivity = $0 }
-                content.text = AppLanguage.choose("Aim stick speed", "瞄準搖桿速度")
+                cell.accessoryView = slider(settings.aimSensitivity, 0.3, 4, label: AppLanguage.choose("Aim look speed")) { [weak self] in self?.settings.aimSensitivity = $0 }
+                content.text = AppLanguage.choose("Aim stick speed")
             case 7:
-                content.text = AppLanguage.choose("Edit controls layout", "編輯按鍵配置")
-                content.secondaryText = ControlsLayout.isCustomized ? AppLanguage.choose("Customized", "已自訂") : AppLanguage.choose("Move, resize or hide buttons", "移動、縮放或隱藏按鍵")
+                content.text = AppLanguage.choose("Edit controls layout")
+                content.secondaryText = ControlsLayout.isCustomized ? AppLanguage.choose("Customized") : AppLanguage.choose("Move, resize or hide buttons")
                 content.textProperties.color = .systemBlue
             case 1:
-                cell.accessoryView = slider(settings.controlScale, 0.7, 1.5, label: AppLanguage.choose("Button size", "按鍵大小")) { [weak self] in self?.settings.controlScale = $0; self?.controlsChanged?() }
-                content.text = AppLanguage.choose("Button size", "按鍵大小")
+                cell.accessoryView = slider(settings.controlScale, 0.7, 1.5, label: AppLanguage.choose("Button size")) { [weak self] in self?.settings.controlScale = $0; self?.controlsChanged?() }
+                content.text = AppLanguage.choose("Button size")
             case 2:
-                cell.accessoryView = slider(settings.controlOpacity, 0.2, 1, label: AppLanguage.choose("Button opacity", "按鍵透明度")) { [weak self] in self?.settings.controlOpacity = $0; self?.controlsChanged?() }
-                content.text = AppLanguage.choose("Button opacity", "按鍵透明度")
+                cell.accessoryView = slider(settings.controlOpacity, 0.2, 1, label: AppLanguage.choose("Button opacity")) { [weak self] in self?.settings.controlOpacity = $0; self?.controlsChanged?() }
+                content.text = AppLanguage.choose("Button opacity")
             case 3:
-                content.text = AppLanguage.choose("Targeting", "瞄準方式")
+                content.text = AppLanguage.choose("Targeting")
                 let button = UIButton(configuration: .gray())
                 button.configuration?.title = GameSettings.targetingTitles[settings.targetingMode]
                 button.menu = UIMenu(children: GameSettings.targetingTitles.enumerated().map { index, title in
                     UIAction(title: title, state: index == settings.targetingMode ? .on : .off) { [weak self] _ in
                         self?.settings.targetingMode = index
                         self?.targetingChanged?()
-                        self?.tableView.reloadSections([Section.controls.rawValue], with: .none)
+                        UIView.performWithoutAnimation { self?.tableView.reloadSections([Section.controls.rawValue], with: .none) }
                     }
                 })
                 button.showsMenuAsPrimaryAction = true
                 button.sizeToFit()
                 cell.accessoryView = button
             case 6:
-                content.text = AppLanguage.choose("Hide when a controller is connected", "連接控制器時隱藏觸控按鍵")
-                content.secondaryText = AppLanguage.choose("Touch controls come back as soon as the controller disconnects", "控制器斷線後會自動恢復觸控按鍵")
-                cell.accessoryView = toggle(settings.hideTouchWithController, label: AppLanguage.choose("Hide touch controls with a controller", "控制器連線時隱藏觸控按鍵")) { [weak self] in self?.settings.hideTouchWithController = $0 }
+                content.text = AppLanguage.choose("Hide when a controller is connected")
+                content.secondaryText = AppLanguage.choose("Touch controls come back as soon as the controller disconnects")
+                cell.accessoryView = toggle(settings.hideTouchWithController, label: AppLanguage.choose("Hide touch controls with a controller")) { [weak self] in self?.settings.hideTouchWithController = $0 }
+            case 8:
+                content.text = AppLanguage.choose("Keyboard and mouse")
+                content.secondaryText = AppLanguage.choose("Play with the PC controls (WASD, mouse look). With both connected, touch controls hide")
+                cell.accessoryView = toggle(settings.keyboardMouse, label: "Keyboard and mouse") { [weak self] in
+                    self?.settings.keyboardMouse = $0
+                    if !$0 { KeyboardMouse.shared.releaseAll() }
+                }
             default:
-                content.text = AppLanguage.choose("Fire also aims", "開火時自動瞄準")
-                content.secondaryText = AppLanguage.choose("Fire locks on first, like the classic mobile GTA games", "開火時先鎖定目標，操作方式類似經典手機版 GTA")
-                cell.accessoryView = toggle(settings.fireAlsoAims, label: AppLanguage.choose("Fire also aims", "開火時自動瞄準")) { [weak self] in self?.settings.fireAlsoAims = $0 }
+                content.text = AppLanguage.choose("Fire also aims")
+                content.secondaryText = AppLanguage.choose("Fire locks on first, like the classic mobile GTA games")
+                cell.accessoryView = toggle(settings.fireAlsoAims, label: AppLanguage.choose("Fire also aims")) { [weak self] in self?.settings.fireAlsoAims = $0 }
             }
         case .gyro:
             let aimRows = settings.gyroAim == .off ? 1 : 3
             if indexPath.row == aimRows {
-                content.text = AppLanguage.choose("Tilt steering", "傾斜轉向")
+                content.text = AppLanguage.choose("Tilt steering")
                 let button = UIButton(configuration: .gray())
                 button.configuration?.title = settings.tiltSteer.title
                 button.menu = UIMenu(children: TiltSteerMode.allCases.map { mode in
                     UIAction(title: mode.title, state: mode == settings.tiltSteer ? .on : .off) { [weak self] _ in
-                        self?.settings.tiltSteer = mode; self?.tableView.reloadSections([Section.gyro.rawValue], with: .automatic)
+                        self?.settings.tiltSteer = mode; UIView.performWithoutAnimation { self?.tableView.reloadSections([Section.gyro.rawValue], with: .none) }
                     }
                 })
                 button.showsMenuAsPrimaryAction = true
@@ -214,15 +261,15 @@ final class SettingsViewController: UITableViewController {
                 cell.accessoryView = button
                 cell.selectionStyle = .none
             } else if indexPath.row == aimRows + 1 {
-                content.text = AppLanguage.choose("Full lock at \(Int(settings.tiltFullLock))°", "轉向到底角度：\(Int(settings.tiltFullLock))°")
-                cell.accessoryView = slider(settings.tiltFullLock, 10, 45, label: AppLanguage.choose("Tilt for full steering", "完全轉向所需傾斜角度")) { [weak self] in self?.settings.tiltFullLock = $0.rounded() }
+                content.text = AppLanguage.interpolate(AppLanguage.choose("Full lock at {arg0}°"), [String(describing: Int(settings.tiltFullLock))])
+                cell.accessoryView = slider(settings.tiltFullLock, 10, 45, label: AppLanguage.choose("Tilt for full steering")) { [weak self] in self?.settings.tiltFullLock = $0.rounded() }
                 cell.selectionStyle = .none
             } else if indexPath.row == 0 {
-                content.text = AppLanguage.choose("Gyro", "陀螺儀")
+                content.text = AppLanguage.choose("Gyro")
                 content.secondaryText = settings.gyroAim.title
                 let menu = UIMenu(children: GyroAimMode.allCases.map { mode in
                     UIAction(title: mode.title, state: mode == settings.gyroAim ? .on : .off) { [weak self] _ in
-                        self?.settings.gyroAim = mode; self?.tableView.reloadSections([Section.gyro.rawValue], with: .automatic)
+                        self?.settings.gyroAim = mode; UIView.performWithoutAnimation { self?.tableView.reloadSections([Section.gyro.rawValue], with: .none) }
                     }
                 })
                 let button = UIButton(configuration: .gray())
@@ -233,41 +280,41 @@ final class SettingsViewController: UITableViewController {
                 cell.accessoryView = button
                 cell.selectionStyle = .none
             } else if indexPath.row == 1 {
-                content.text = String(format: AppLanguage.choose("Sensitivity %.1f×", "靈敏度 %.1f×"), settings.gyroSensitivity)
+                content.text = String(format: AppLanguage.choose("Sensitivity %.1f×"), settings.gyroSensitivity)
                 let slider = UISlider()
                 slider.minimumValue = 0.2; slider.maximumValue = 3
                 slider.value = Float(settings.gyroSensitivity)
                 slider.frame.size.width = 150
-                slider.accessibilityLabel = AppLanguage.choose("Gyro sensitivity", "陀螺儀靈敏度")
+                slider.accessibilityLabel = AppLanguage.choose("Gyro sensitivity")
                 slider.addAction(UIAction { [weak self, weak slider] _ in
                     guard let self, let slider else { return }
                     self.settings.gyroSensitivity = (Double(slider.value) * 10).rounded() / 10
                     var updated = cell.defaultContentConfiguration()
-                    updated.text = String(format: AppLanguage.choose("Sensitivity %.1f×", "靈敏度 %.1f×"), self.settings.gyroSensitivity)
+                    updated.text = String(format: AppLanguage.choose("Sensitivity %.1f×"), self.settings.gyroSensitivity)
                     cell.contentConfiguration = updated
                 }, for: .valueChanged)
                 cell.accessoryView = slider
                 cell.selectionStyle = .none
             } else {
-                content.text = AppLanguage.choose("Invert vertical", "反轉上下方向")
-                cell.accessoryView = toggle(settings.gyroInvertY, label: AppLanguage.choose("Invert vertical gyro", "反轉陀螺儀垂直方向")) { [weak self] in self?.settings.gyroInvertY = $0 }
+                content.text = AppLanguage.choose("Invert vertical")
+                cell.accessoryView = toggle(settings.gyroInvertY, label: AppLanguage.choose("Invert vertical gyro")) { [weak self] in self?.settings.gyroInvertY = $0 }
                 cell.selectionStyle = .none
             }
         case .files:
             configureFileCell(cell, &content, fileRows[indexPath.row])
         case .language:
             cell.selectionStyle = .none
-            content.text = AppLanguage.choose("App language", "應用程式語言")
-            content.secondaryText = AppLanguage.choose("Language for menus and settings", "主選單、設定及按鍵介面語言")
+            content.text = AppLanguage.choose("App language")
+            content.secondaryText = AppLanguage.choose("Language for menus and settings")
             let button = UIButton(type: .system)
             button.setTitle(AppLanguage.current.name + " ▾", for: .normal)
-            button.accessibilityLabel = AppLanguage.choose("App language", "應用程式語言")
+            button.accessibilityLabel = AppLanguage.choose("App language")
             button.showsMenuAsPrimaryAction = true
             button.menu = UIMenu(children: AppLanguage.allCases.map { language in
                 UIAction(title: language.name, state: language == AppLanguage.current ? .on : .off) { [weak self] _ in
                     AppLanguage.select(language)
-                    self?.title = AppLanguage.choose("Settings", "設定")
-                    self?.navigationItem.rightBarButtonItem?.title = AppLanguage.choose("Done", "完成")
+                    self?.title = AppLanguage.choose("Settings")
+                    self?.navigationItem.rightBarButtonItem?.title = AppLanguage.choose("Done")
                     self?.tableView.reloadData()
                 }
             })
@@ -280,12 +327,12 @@ final class SettingsViewController: UITableViewController {
                 content.textProperties.color = .secondaryLabel
                 cell.selectionStyle = .none
             } else if indexPath.row == 1 {
-                content.text = AppLanguage.choose("Send log to the developer", "傳送紀錄給開發者")
-                content.secondaryText = AppLanguage.choose("One tap. Helps fix crashes and loading problems", "回報閃退與載入問題，協助開發者排查")
+                content.text = AppLanguage.choose("Send log to the developer")
+                content.secondaryText = AppLanguage.choose("One tap. Helps fix crashes and loading problems")
                 content.textProperties.color = .systemBlue
             } else {
-                content.text = AppLanguage.choose("Share log", "分享紀錄")
-                content.secondaryText = AppLanguage.choose("Save or send this run's log and the previous one yourself", "儲存或分享本次及前次執行紀錄")
+                content.text = AppLanguage.choose("Share log")
+                content.secondaryText = AppLanguage.choose("Save or send this run's log and the previous one yourself")
                 content.textProperties.color = .systemBlue
             }
         }
@@ -299,9 +346,10 @@ final class SettingsViewController: UITableViewController {
         if indexPath.section == Section.device.rawValue, indexPath.row == 2 { shareLogs(from: tableView.cellForRow(at: indexPath)); return }
         if indexPath.section == Section.controls.rawValue, indexPath.row == 7 { editLayout?(); return }
         if indexPath.section == Section.mode.rawValue {
+            guard indexPath.row < GameMode.allCases.count else { return }
             settings.gameMode = GameMode.allCases[indexPath.row]
             gameModeChanged?()
-            tableView.reloadSections([Section.mode.rawValue], with: .none)
+            UIView.performWithoutAnimation { tableView.reloadSections([Section.mode.rawValue], with: .none) }
             return
         }
         if indexPath.section == Section.files.rawValue { selectFileRow(fileRows[indexPath.row]); return }
@@ -309,7 +357,7 @@ final class SettingsViewController: UITableViewController {
         guard indexPath.section == Section.graphics.rawValue, indexPath.row < presets.count else { return }
         settings.graphicsPreset = presets[indexPath.row]
         resolutionChanged?()
-        tableView.reloadSections([Section.graphics.rawValue], with: .none)
+        UIView.performWithoutAnimation { tableView.reloadSections([Section.graphics.rawValue], with: .none) }
     }
 
     // MARK: Game files
@@ -349,7 +397,7 @@ final class SettingsViewController: UITableViewController {
 
     private func progressText() -> String {
         let percent = Int((preloader.fraction * 100).rounded(.down))
-        var text = AppLanguage.choose("\(percent)% · \(AssetPreloader.format(preloader.cachedBytes)) of \(AssetPreloader.format(preloader.totalBytes))", "\(percent)% · \(AssetPreloader.format(preloader.cachedBytes)) / \(AssetPreloader.format(preloader.totalBytes))")
+        var text = AppLanguage.interpolate(AppLanguage.choose("{arg0}% · {arg1} of {arg2}"), [String(describing: percent), String(describing: AssetPreloader.format(preloader.cachedBytes)), String(describing: AssetPreloader.format(preloader.totalBytes))])
         if preloader.phase == .downloading {
             if let rate = preloader.bytesPerSecond { text += " · \(AssetPreloader.format(UInt64(rate)))/s" }
             if let seconds = preloader.secondsRemaining { text += " · " + AssetPreloader.formatDuration(seconds) }
@@ -358,55 +406,55 @@ final class SettingsViewController: UITableViewController {
     }
 
     private func configureFileCell(_ cell: UITableViewCell, _ content: inout UIListContentConfiguration, _ row: FileRow) {
-        let total = preloader.measured ? AssetPreloader.format(preloader.totalBytes) : AppLanguage.choose("Checking size", "正在檢查大小")
+        let total = preloader.measured ? AssetPreloader.format(preloader.totalBytes) : AppLanguage.choose("Checking size")
         switch row {
         case .status:
             cell.selectionStyle = .none
             switch preloader.phase {
             case .unavailable(let reason):
-                content.text = AppLanguage.choose("Download all game files", "下載完整遊戲資料")
+                content.text = AppLanguage.choose("Download all game files")
                 content.secondaryText = reason
                 content.textProperties.color = .secondaryLabel
             case .complete:
-                content.text = AppLanguage.choose("All files on device", "遊戲資料已完整下載")
-                content.secondaryText = AppLanguage.choose("\(total) · plays without streaming", "\(total) · 無須串流即可遊玩")
+                content.text = AppLanguage.choose("All files on device")
+                content.secondaryText = AppLanguage.interpolate(AppLanguage.choose("{arg0} · plays without streaming"), [String(describing: total)])
                 content.image = UIImage(systemName: "checkmark.circle.fill")
-                content.imageProperties.tintColor = .systemGreen
+                content.imageProperties.tintColor = Theme.ok
             case .downloading:
-                content.text = AppLanguage.choose("Downloading game files", "正在下載遊戲資料")
+                content.text = AppLanguage.choose("Downloading game files")
                 content.secondaryText = progressText()
                 cell.accessoryView = progressView()
             default:
-                content.text = preloader.lastError == nil ? AppLanguage.choose("Download paused", "下載已暫停") : AppLanguage.choose("Download stopped", "下載已停止")
+                content.text = preloader.lastError == nil ? AppLanguage.choose("Download paused") : AppLanguage.choose("Download stopped")
                 content.secondaryText = progressText()
                 cell.accessoryView = progressView()
             }
         case .start:
-            content.text = AppLanguage.choose("Download all game files", "下載完整遊戲資料")
+            content.text = AppLanguage.choose("Download all game files")
             content.textProperties.color = .tintColor
             if preloader.cachedBytes > 0 && preloader.measured {
-                content.secondaryText = AppLanguage.choose("\(total) · \(AssetPreloader.format(preloader.cachedBytes)) already on this iPhone", "總共 \(total) · 已下載 \(AssetPreloader.format(preloader.cachedBytes))")
+                content.secondaryText = AppLanguage.interpolate(AppLanguage.choose("{arg0} · {arg1} already on this iPhone"), [String(describing: total), String(describing: AssetPreloader.format(preloader.cachedBytes))])
             } else {
                 content.secondaryText = total
             }
             content.image = UIImage(systemName: "arrow.down.circle")
         case .pause:
-            content.text = AppLanguage.choose("Pause", "暫停")
+            content.text = AppLanguage.choose("Pause")
             content.textProperties.color = .tintColor
             content.image = UIImage(systemName: "pause.circle")
         case .resume:
-            content.text = AppLanguage.choose("Resume download", "繼續下載")
+            content.text = AppLanguage.choose("Resume download")
             content.textProperties.color = .tintColor
             content.image = UIImage(systemName: "arrow.down.circle")
         case .cancel:
-            content.text = AppLanguage.choose("Cancel download", "取消下載")
-            content.secondaryText = AppLanguage.choose("Keeps what is already downloaded", "已下載的資料會保留")
+            content.text = AppLanguage.choose("Cancel download")
+            content.secondaryText = AppLanguage.choose("Keeps what is already downloaded")
             content.textProperties.color = .systemRed
             content.image = UIImage(systemName: "xmark.circle")
             content.imageProperties.tintColor = .systemRed
         case .remove:
-            content.text = preloader.removing ? AppLanguage.choose("Removing files…", "正在刪除檔案…") : AppLanguage.choose("Remove downloaded files", "刪除已下載的檔案")
-            content.secondaryText = engineRunning ? AppLanguage.choose("Available after restarting the app", "重啟 App 後才能使用") : AppLanguage.choose("Frees \(AssetPreloader.format(preloader.cachedBytes))", "可釋放 \(AssetPreloader.format(preloader.cachedBytes))")
+            content.text = preloader.removing ? AppLanguage.choose("Removing files…") : AppLanguage.choose("Remove downloaded files")
+            content.secondaryText = engineRunning ? AppLanguage.choose("Available after restarting the app") : AppLanguage.interpolate(AppLanguage.choose("Frees {arg0}"), [String(describing: AssetPreloader.format(preloader.cachedBytes))])
             content.textProperties.color = engineRunning ? .secondaryLabel : .systemRed
             content.image = UIImage(systemName: "trash")
             content.imageProperties.tintColor = engineRunning ? .secondaryLabel : .systemRed
@@ -418,7 +466,7 @@ final class SettingsViewController: UITableViewController {
         let bar = UIProgressView(progressViewStyle: .default)
         bar.frame.size.width = 110
         bar.progress = Float(preloader.fraction)
-        bar.accessibilityLabel = AppLanguage.choose("Download progress", "下載進度")
+        bar.accessibilityLabel = AppLanguage.choose("Download progress")
         return bar
     }
 
@@ -428,11 +476,11 @@ final class SettingsViewController: UITableViewController {
         switch preloader.phase {
         case .unavailable: return text
         case .complete:
-            text += AppLanguage.choose("The game reads everything from this iPhone. Removing the files frees the space; the game then streams again.", "遊戲會直接讀取手機上的資料；刪除後可騰出空間，但之後必須重新使用串流。")
+            text += AppLanguage.choose("The game reads everything from this iPhone. Removing the files frees the space; the game then streams again.")
         default:
             text += "Saves the whole game on this iPhone (\(preloader.measured ? AssetPreloader.format(preloader.totalBytes) : "about 21 GB")) so it no longer streams from the server. Tailscale must be connected while it downloads. Keep the app open: in the background the download pauses after a short while and continues when you come back. You can play while it downloads."
             if preloader.cachedBytes > 0 && preloader.phase != .downloading {
-                text += AppLanguage.choose(" Removing files also clears the startup set; the next Play prepares it again.", " 刪除檔案也會清除啟動所需的快取；下次遊玩時會重新準備。")
+                text += AppLanguage.choose(" Removing files also clears the startup set; the next Play prepares it again.")
             }
         }
         return text
@@ -445,28 +493,28 @@ final class SettingsViewController: UITableViewController {
         case .start, .resume:
             let start = { [weak self] in
                 guard let self else { return }
-                if let message = self.preloader.start() { self.showAlert(AppLanguage.choose("Can't download", "無法下載"), message) }
+                if let message = self.preloader.start() { self.showAlert(AppLanguage.choose("Can't download"), message) }
             }
             if row == .start {
-                let alert = UIAlertController(title: AppLanguage.choose("Download all game files?", "要下載完整遊戲資料嗎？"),
-                    message: AppLanguage.choose("This saves \(AssetPreloader.format(preloader.missingBytes)) more on this iPhone (\(AssetPreloader.format(preloader.availableBytes())) free). Wi-Fi and Tailscale recommended.", "還需要在手機上儲存 \(AssetPreloader.format(preloader.missingBytes))（可用空間 \(AssetPreloader.format(preloader.availableBytes()))）。建議使用 Wi-Fi 和 Tailscale。"),
+                let alert = UIAlertController(title: AppLanguage.choose("Download all game files?"),
+                    message: AppLanguage.interpolate(AppLanguage.choose("This saves {arg0} more on this iPhone ({arg1} free). Wi-Fi and Tailscale recommended."), [String(describing: AssetPreloader.format(preloader.missingBytes)), String(describing: AssetPreloader.format(preloader.availableBytes()))]),
                     preferredStyle: .alert)
-                alert.addAction(UIAlertAction(title: AppLanguage.choose("Cancel", "取消"), style: .cancel))
-                alert.addAction(UIAlertAction(title: AppLanguage.choose("Download", "下載"), style: .default) { _ in start() })
+                alert.addAction(UIAlertAction(title: AppLanguage.choose("Cancel"), style: .cancel))
+                alert.addAction(UIAlertAction(title: AppLanguage.choose("Download"), style: .default) { _ in start() })
                 present(alert, animated: true)
             } else { start() }
         case .pause: preloader.pause()
         case .cancel: preloader.cancel()
         case .remove:
             guard !engineRunning else { return }
-            let alert = UIAlertController(title: AppLanguage.choose("Remove downloaded files?", "確定刪除已下載的資料？"),
-                message: AppLanguage.choose("Frees \(AssetPreloader.format(preloader.cachedBytes)). The game will stream from the server again.", "可釋放 \(AssetPreloader.format(preloader.cachedBytes))，遊戲之後將重新透過伺服器串流。"),
+            let alert = UIAlertController(title: AppLanguage.choose("Remove downloaded files?"),
+                message: AppLanguage.interpolate(AppLanguage.choose("Frees {arg0}. The game will stream from the server again."), [String(describing: AssetPreloader.format(preloader.cachedBytes))]),
                 preferredStyle: .alert)
-            alert.addAction(UIAlertAction(title: AppLanguage.choose("Cancel", "取消"), style: .cancel))
-            alert.addAction(UIAlertAction(title: AppLanguage.choose("Remove", "刪除"), style: .destructive) { [weak self] _ in
+            alert.addAction(UIAlertAction(title: AppLanguage.choose("Cancel"), style: .cancel))
+            alert.addAction(UIAlertAction(title: AppLanguage.choose("Remove"), style: .destructive) { [weak self] _ in
                 guard let self else { return }
                 self.preloader.removeDownloads { message in
-                    if let message { self.showAlert(AppLanguage.choose("Can't remove files", "無法刪除檔案"), message) }
+                    if let message { self.showAlert(AppLanguage.choose("Can't remove files"), message) }
                 }
             })
             present(alert, animated: true)
@@ -476,7 +524,7 @@ final class SettingsViewController: UITableViewController {
 
     private func showAlert(_ title: String, _ message: String) {
         let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
-        alert.addAction(UIAlertAction(title: AppLanguage.choose("OK", "確定"), style: .default))
+        alert.addAction(UIAlertAction(title: AppLanguage.choose("OK"), style: .default))
         present(alert, animated: true)
     }
 
@@ -484,7 +532,7 @@ final class SettingsViewController: UITableViewController {
         let screen = view.window?.windowScene?.screen.bounds.size ?? UIScreen.main.bounds.size
         let (w, h) = GraphicsConfiguration.size(for: engineRunning ? bootPreset : settings.graphicsPreset, renderHeight: settings.renderHeight,
                                                 screen: screen, matchScreenShape: settings.matchScreenShape)
-        return AppLanguage.choose("Renders at \(w)×\(h)", "目前渲染解析度：\(w)×\(h)")
+        return AppLanguage.interpolate(AppLanguage.choose("Renders at {arg0}×{arg1}"), [String(describing: w), String(describing: h)])
     }
     /// Uploads the logs after the player confirms, with an optional note (its own screen, so the
     /// keyboard never covers Send in landscape).
@@ -499,7 +547,7 @@ final class SettingsViewController: UITableViewController {
         let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let logs = ["native-port.log", "native-port-previous.log"].map { documents.appendingPathComponent($0) }
             .filter { FileManager.default.fileExists(atPath: $0.path) }
-        guard !logs.isEmpty else { showAlert(AppLanguage.choose("No log yet", "尚無紀錄"), AppLanguage.choose("Start the game once, then try again.", "請先啟動一次遊戲，再重試。")); return }
+        guard !logs.isEmpty else { showAlert(AppLanguage.choose("No log yet"), AppLanguage.choose("Start the game once, then try again.")); return }
         let sheet = UIActivityViewController(activityItems: logs, applicationActivities: nil)
         sheet.popoverPresentationController?.sourceView = cell ?? view
         present(sheet, animated: true)
@@ -508,9 +556,9 @@ final class SettingsViewController: UITableViewController {
         if height == 0 {
             let screen = view.window?.windowScene?.screen.bounds.size ?? UIScreen.main.bounds.size
             let (_, h) = GraphicsConfiguration.size(for: engineRunning ? bootPreset : settings.graphicsPreset, renderHeight: 0, screen: screen, matchScreenShape: settings.matchScreenShape)
-            return AppLanguage.choose("Auto (\(h)p)", "自動（\(h)p）")
+            return AppLanguage.interpolate(AppLanguage.choose("Auto ({arg0}p)"), [String(describing: h)])
         }
-        return height == GraphicsConfiguration.nativeHeight ? AppLanguage.choose("Native (\(height)p)", "原生（\(height)p）") : "\(height)p"
+        return height == GraphicsConfiguration.nativeHeight ? AppLanguage.interpolate(AppLanguage.choose("Native ({arg0}p)"), [String(describing: height)]) : "\(height)p"
     }
     private func reloadFooters() {
         UIView.performWithoutAnimation { tableView.reloadSections([Section.graphics.rawValue], with: .none) }
