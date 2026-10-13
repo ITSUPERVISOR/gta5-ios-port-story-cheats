@@ -490,6 +490,30 @@ void PGUpdateController(PGControllerState state, double elapsedSeconds) {
 }
 
 
+// Controller-swipe A/B reference: gestures are impulses, not held sticks.
+// UIKit and the engine sample at different times, so consume queued motion
+// only at the engine's ioPad update (never immediately clear on the UI tick).
+#define PG_CAMERA_SWIPE_SCALE 1024.0f
+static _Atomic int32_t pendingCameraSwipeX;
+static _Atomic int32_t pendingCameraSwipeY;
+void PGQueueCameraSwipe(float x, float y) {
+  if (!isfinite(x) || !isfinite(y)) return;
+  x = fmaxf(-1000, fminf(1000, x));
+  y = fmaxf(-1000, fminf(1000, y));
+  atomic_fetch_add(&pendingCameraSwipeX, (int32_t)lroundf(x * PG_CAMERA_SWIPE_SCALE));
+  atomic_fetch_add(&pendingCameraSwipeY, (int32_t)lroundf(y * PG_CAMERA_SWIPE_SCALE));
+}
+void PGClearCameraSwipe(void) {
+  atomic_exchange(&pendingCameraSwipeX, 0);
+  atomic_exchange(&pendingCameraSwipeY, 0);
+}
+static float pg_camera_swipe_axis(float delta, double elapsed) {
+  const float velocity = fabsf(delta) / fmaxf(1.f/240.f, fminf(1.f/15.f, (float)elapsed));
+  const float normalized = fminf(1.f, velocity / 1100.f);
+  if (normalized <= 0.025f) return 0;
+  return copysignf(0.245f + 0.755f * powf(normalized, 0.85f), delta);
+}
+
 // Virtual pad: packed so the engine thread reads one consistent sample.
 // bits 0-15 buttons, then LX LY RX RY L2 R2 bytes (0x80 = centred stick).
 static _Atomic uint64_t virtualPad = 0x0000808080800000ull;
@@ -579,6 +603,24 @@ void pg_virtual_pad_apply(w2c_game *instance, uint64_t pad) {
 #endif
   if (pad != 12840656 || !atomic_load(&virtualPadActive)) return;
   uint64_t packed = atomic_load(&virtualPad);
+  // Use the last actual engine-sample interval (not display-link callbacks).
+  static _Thread_local double lastSwipePollMS;
+  const double nowMS = timeMS(CLOCK_MONOTONIC);
+  const double elapsed = lastSwipePollMS > 0 ? fmax(1.0/240.0, fmin(0.0667, (nowMS - lastSwipePollMS) / 1000.0)) : 1.0/60.0;
+  lastSwipePollMS = nowMS;
+  const float dx = (float)atomic_exchange(&pendingCameraSwipeX, 0) / PG_CAMERA_SWIPE_SCALE;
+  const float dy = (float)atomic_exchange(&pendingCameraSwipeY, 0) / PG_CAMERA_SWIPE_SCALE;
+  // The selection wheels own the stick even when a look finger is down.
+  const bool selectionWheel = (packed & ((1ull << 2) | (1ull << 14))) != 0;
+  if (!selectionWheel && (dx != 0 || dy != 0)) {
+    const float baseX = ((packed >> 32 & 255) - 127.5f) / 127.5f;
+    const float baseY = (127.5f - (packed >> 40 & 255)) / 127.5f;
+    const float lookX = fmaxf(-1, fminf(1, baseX + pg_camera_swipe_axis(dx, elapsed)));
+    const float lookY = fmaxf(-1, fminf(1, baseY + pg_camera_swipe_axis(dy, elapsed)));
+    packed = (packed & ~(0xffffull << 32)) |
+      (uint64_t)pg_pad_axis(lookX, false) << 32 |
+      (uint64_t)pg_pad_axis(lookY, true) << 40;
+  }
   uint8_t *base = pg_pointer(&env, pad, 136);
   _Atomic uint32_t *buttons = (_Atomic uint32_t *)(base + 12);
   uint32_t bits = (uint32_t)(packed & 0xffff);

@@ -73,6 +73,9 @@ typedef struct {
   float leftX, leftY, rightX, rightY, leftTrigger, rightTrigger;
 } PGPadState;
 void PGUpdateVirtualPad(PGPadState state);
+// Existing controller-swipe impulse bridge, consumed on engine input sampling.
+void PGQueueCameraSwipe(float x, float y);
+void PGClearCameraSwipe(void);
 // The engine's last input device for the player: -4 keyboard/mouse,
 // 0...3 pads, -3 unknown. Assisted aim needs a pad.
 int32_t PGLastInputDevice(void);
