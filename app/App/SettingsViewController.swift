@@ -15,6 +15,42 @@ final class SettingsViewController: UITableViewController {
     var gameModeChanged: (() -> Void)?
 
     private enum Section: Int, CaseIterable { case language, mode, graphics, controls, gyro, files, device }
+    // The switch controls both the visible settings group and the active
+    // camera input. It does NOT spoof the engine's last-input-device flag:
+    // that flag is shared by the game's own aim-assist logic.
+    private enum ControlsTab: Int { case touch = 0, gamepad = 1 }
+    private enum ControlsRow {
+        case tab, swipeMode, swipeLook, swipeAim, stickLook, stickAim
+        case targeting, fireAlsoAims, buttonSize, buttonOpacity, editLayout
+        case hideTouchWithController, keyboardMouse, inputState
+    }
+    private var controlsTab: ControlsTab {
+        settings.cameraTouchMode == .stick ? .gamepad : .touch
+    }
+    private var controlsRows: [ControlsRow] {
+        switch controlsTab {
+        case .touch:
+            return [.tab, .swipeMode, .swipeLook, .swipeAim,
+                    .targeting, .fireAlsoAims, .buttonSize, .buttonOpacity,
+                    .editLayout, .hideTouchWithController, .inputState]
+        case .gamepad:
+            return [.tab, .stickLook, .stickAim, .targeting,
+                    .hideTouchWithController, .keyboardMouse, .editLayout, .inputState]
+        }
+    }
+
+    @objc private func controlsTabChanged(_ sender: UISegmentedControl) {
+        if sender.selectedSegmentIndex == ControlsTab.touch.rawValue {
+            settings.cameraTouchMode = settings.preferredSwipeMode
+        } else {
+            settings.cameraTouchMode = .stick
+        }
+        controlsChanged?()
+        UIView.performWithoutAnimation {
+            tableView.reloadSections(IndexSet(integer: Section.controls.rawValue), with: .none)
+        }
+    }
+
     private let preloader = AssetPreloader.shared
     /// Rows shown in the Game files section, rebuilt from the preloader's phase.
     private enum FileRow { case status, start, pause, resume, cancel, remove }
@@ -79,12 +115,19 @@ final class SettingsViewController: UITableViewController {
         switch Section(rawValue: section)! {
         case .mode: return GameMode.allCases.count + (settings.gameModeChoice == .sandbox ? 1 : 0)
         case .graphics: return settings.tier.allowed.count + 3
-        case .controls: return 10
+        case .controls: return controlsRows.count
         case .gyro: return (settings.gyroAim == .off ? 1 : 3) + (settings.tiltSteer == .off ? 1 : 2)
         case .files: return fileRows.count
         case .device: return 3
         case .language: return 1
         }
+    }
+
+    override func tableView(_ tableView: UITableView, heightForRowAt indexPath: IndexPath) -> CGFloat {
+        // The full-width segmented control needs more space than a standard row.
+        if indexPath.section == Section.controls.rawValue,
+           controlsRows[indexPath.row] == .tab { return 58 }
+        return UITableView.automaticDimension
     }
 
     override func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
@@ -107,7 +150,7 @@ final class SettingsViewController: UITableViewController {
             if settings.tier.risky(settings.graphicsPreset) { text += AppLanguage.choose(" Presets above the recommended one can run out of memory or overheat on this phone; if a launch fails, the game falls back automatically.") }
             return text
         case .controls:
-            return AppLanguage.choose("Controls act as a game controller, so the game's own aim assist and analog steering work. Assisted aim locks onto targets like on a console.")
+            return AppLanguage.choose("Switching tabs changes the camera control and the settings below. It does not force GTA V's in-game button prompt icons.")
         case .gyro:
             return AppLanguage.choose("Move the phone to fine-tune your aim; turning your body turns the camera. Tilt steering turns the phone like a steering wheel: Assist adds fine control on top of the touch steering, Tilt to steer replaces it. The straight-ahead angle is however you hold the phone when you get in.")
         case .files: return filesFooter()
@@ -198,24 +241,77 @@ final class SettingsViewController: UITableViewController {
             }
         case .controls:
             cell.selectionStyle = .none
-            switch indexPath.row {
-            case 0:
-                cell.accessoryView = slider(settings.lookSensitivity, 0.3, 3, label: AppLanguage.choose("Look speed")) { [weak self] in self?.settings.lookSensitivity = $0 }
+            switch controlsRows[indexPath.row] {
+            case .tab:
+                // Full-width, persistent-feeling tabs; the actual input mode
+                // changes only on an intentional tap, never during a swipe.
+                let tabs = UISegmentedControl(items: [
+                    "☝️ " + AppLanguage.choose("Touch"),
+                    "🎮 " + AppLanguage.choose("Gamepad")
+                ])
+                tabs.selectedSegmentIndex = controlsTab.rawValue
+                tabs.selectedSegmentTintColor = Theme.accent
+                // Keep both labels legible against the dark Settings sheet.
+                tabs.backgroundColor = UIColor(white: 1, alpha: 0.12)
+                tabs.setTitleTextAttributes([.foregroundColor: UIColor.white], for: .normal)
+                tabs.setTitleTextAttributes([.foregroundColor: UIColor.black], for: .selected)
+                tabs.accessibilityLabel = AppLanguage.choose("Camera control")
+                tabs.addTarget(self, action: #selector(controlsTabChanged(_:)), for: .valueChanged)
+                tabs.translatesAutoresizingMaskIntoConstraints = false
+                cell.contentView.addSubview(tabs)
+                NSLayoutConstraint.activate([
+                    tabs.leadingAnchor.constraint(equalTo: cell.contentView.layoutMarginsGuide.leadingAnchor),
+                    tabs.trailingAnchor.constraint(equalTo: cell.contentView.layoutMarginsGuide.trailingAnchor),
+                    tabs.topAnchor.constraint(equalTo: cell.contentView.topAnchor, constant: 11),
+                    tabs.bottomAnchor.constraint(equalTo: cell.contentView.bottomAnchor, constant: -11),
+                    tabs.heightAnchor.constraint(greaterThanOrEqualToConstant: 34)
+                ])
+            case .swipeMode:
+                content.text = AppLanguage.choose("Camera touch mode (experimental)")
+                content.secondaryText = AppLanguage.choose("Swipe to move the camera")
+                let button = UIButton(configuration: .gray())
+                button.configuration?.title = settings.cameraTouchMode.title
+                let swipeModes: [GameSettings.CameraTouchMode] = [.swipeMouse, .swipePad]
+                button.menu = UIMenu(children: swipeModes.map { mode in
+                    UIAction(title: mode.title, state: mode == settings.cameraTouchMode ? .on : .off) { [weak self] _ in
+                        guard let self else { return }
+                        self.settings.cameraTouchMode = mode
+                        self.controlsChanged?()
+                        UIView.performWithoutAnimation { self.tableView.reloadSections(IndexSet(integer: Section.controls.rawValue), with: .none) }
+                    }
+                })
+                button.showsMenuAsPrimaryAction = true
+                button.sizeToFit()
+                cell.accessoryView = button
+            case .swipeLook:
+                let mouse = settings.cameraTouchMode == .swipeMouse
+                let value = mouse ? settings.mouseLookSensitivity : settings.swipeLookSensitivity
+                content.text = AppLanguage.choose("Swipe look sensitivity")
+                cell.accessoryView = sensitivitySlider(value, low: GameSettings.swipeSensitivityMinimum, high: GameSettings.swipeSensitivityMaximum,
+                    label: AppLanguage.choose("Swipe look sensitivity")) { [weak self] v in
+                    guard let self else { return }
+                    if mouse { self.settings.mouseLookSensitivity = v } else { self.settings.swipeLookSensitivity = v }
+                }
+            case .swipeAim:
+                let mouse = settings.cameraTouchMode == .swipeMouse
+                let value = mouse ? settings.mouseAimSensitivity : settings.swipeAimSensitivity
+                content.text = AppLanguage.choose("Swipe aim sensitivity")
+                cell.accessoryView = sensitivitySlider(value, low: GameSettings.swipeSensitivityMinimum, high: GameSettings.swipeSensitivityMaximum,
+                    label: AppLanguage.choose("Swipe aim sensitivity")) { [weak self] v in
+                    guard let self else { return }
+                    if mouse { self.settings.mouseAimSensitivity = v } else { self.settings.swipeAimSensitivity = v }
+                }
+            case .stickLook:
                 content.text = AppLanguage.choose("Camera stick speed")
-            case 5:
-                cell.accessoryView = slider(settings.aimSensitivity, 0.3, 4, label: AppLanguage.choose("Aim look speed")) { [weak self] in self?.settings.aimSensitivity = $0 }
+                content.secondaryText = AppLanguage.choose("Virtual right stick")
+                cell.accessoryView = sensitivitySlider(settings.lookSensitivity, low: 0.3, high: 3,
+                    label: AppLanguage.choose("Look speed")) { [weak self] v in self?.settings.lookSensitivity = v }
+            case .stickAim:
                 content.text = AppLanguage.choose("Aim stick speed")
-            case 7:
-                content.text = AppLanguage.choose("Edit controls layout")
-                content.secondaryText = ControlsLayout.isCustomized ? AppLanguage.choose("Customized") : AppLanguage.choose("Move, resize or hide buttons")
-                content.textProperties.color = .systemBlue
-            case 1:
-                cell.accessoryView = slider(settings.controlScale, 0.7, 1.5, label: AppLanguage.choose("Button size")) { [weak self] in self?.settings.controlScale = $0; self?.controlsChanged?() }
-                content.text = AppLanguage.choose("Button size")
-            case 2:
-                cell.accessoryView = slider(settings.controlOpacity, 0.2, 1, label: AppLanguage.choose("Button opacity")) { [weak self] in self?.settings.controlOpacity = $0; self?.controlsChanged?() }
-                content.text = AppLanguage.choose("Button opacity")
-            case 3:
+                content.secondaryText = AppLanguage.choose("Virtual right stick")
+                cell.accessoryView = sensitivitySlider(settings.aimSensitivity, low: 0.3, high: 4,
+                    label: AppLanguage.choose("Aim look speed")) { [weak self] v in self?.settings.aimSensitivity = v }
+            case .targeting:
                 content.text = AppLanguage.choose("Targeting")
                 let button = UIButton(configuration: .gray())
                 button.configuration?.title = GameSettings.targetingTitles[settings.targetingMode]
@@ -223,27 +319,49 @@ final class SettingsViewController: UITableViewController {
                     UIAction(title: title, state: index == settings.targetingMode ? .on : .off) { [weak self] _ in
                         self?.settings.targetingMode = index
                         self?.targetingChanged?()
-                        UIView.performWithoutAnimation { self?.tableView.reloadSections([Section.controls.rawValue], with: .none) }
+                        UIView.performWithoutAnimation { self?.tableView.reloadSections(IndexSet(integer: Section.controls.rawValue), with: .none) }
                     }
                 })
                 button.showsMenuAsPrimaryAction = true
                 button.sizeToFit()
                 cell.accessoryView = button
-            case 6:
-                content.text = AppLanguage.choose("Hide when a controller is connected")
-                content.secondaryText = AppLanguage.choose("Touch controls come back as soon as the controller disconnects")
-                cell.accessoryView = toggle(settings.hideTouchWithController, label: AppLanguage.choose("Hide touch controls with a controller")) { [weak self] in self?.settings.hideTouchWithController = $0 }
-            case 8:
-                content.text = AppLanguage.choose("Keyboard and mouse")
-                content.secondaryText = AppLanguage.choose("Play with the PC controls (WASD, mouse look). With both connected, touch controls hide")
-                cell.accessoryView = toggle(settings.keyboardMouse, label: "Keyboard and mouse") { [weak self] in
-                    self?.settings.keyboardMouse = $0
-                    if !$0 { KeyboardMouse.shared.releaseAll() }
-                }
-            default:
+            case .fireAlsoAims:
                 content.text = AppLanguage.choose("Fire also aims")
                 content.secondaryText = AppLanguage.choose("Fire locks on first, like the classic mobile GTA games")
                 cell.accessoryView = toggle(settings.fireAlsoAims, label: AppLanguage.choose("Fire also aims")) { [weak self] in self?.settings.fireAlsoAims = $0 }
+            case .buttonSize:
+                content.text = AppLanguage.choose("Button size")
+                cell.accessoryView = slider(settings.controlScale, 0.7, 1.5, label: AppLanguage.choose("Button size")) { [weak self] in
+                    self?.settings.controlScale = $0; self?.controlsChanged?()
+                }
+            case .buttonOpacity:
+                content.text = AppLanguage.choose("Button opacity")
+                cell.accessoryView = slider(settings.controlOpacity, 0.2, 1, label: AppLanguage.choose("Button opacity")) { [weak self] in
+                    self?.settings.controlOpacity = $0; self?.controlsChanged?()
+                }
+            case .editLayout:
+                content.text = AppLanguage.choose("Edit controls layout")
+                content.secondaryText = ControlsLayout.isCustomized ? AppLanguage.choose("Customized") : AppLanguage.choose("Move, resize or hide buttons")
+                content.textProperties.color = .systemBlue
+                cell.selectionStyle = .default
+            case .hideTouchWithController:
+                content.text = AppLanguage.choose("Hide when a controller is connected")
+                content.secondaryText = AppLanguage.choose("Touch controls come back as soon as the controller disconnects")
+                cell.accessoryView = toggle(settings.hideTouchWithController,
+                    label: AppLanguage.choose("Hide touch controls with a controller")) { [weak self] in
+                    self?.settings.hideTouchWithController = $0
+                }
+            case .keyboardMouse:
+                content.text = AppLanguage.choose("Keyboard and mouse")
+                content.secondaryText = AppLanguage.choose("Play with the PC controls (WASD, mouse look). With both connected, touch controls hide")
+                cell.accessoryView = toggle(settings.keyboardMouse, label: AppLanguage.choose("Keyboard and mouse")) { [weak self] in
+                    self?.settings.keyboardMouse = $0
+                    if !$0 { KeyboardMouse.shared.releaseAll() }
+                }
+            case .inputState:
+                content.text = AppLanguage.choose("Input device (live test)")
+                let device = PGLastInputDevice()
+                content.secondaryText = "\(device == -4 ? "Mouse/keyboard" : (0...3).contains(device) ? "Controller" : "Unknown") [\(device)] · Aim mode: \(PGTargetingMode())"
             }
         case .gyro:
             let aimRows = settings.gyroAim == .off ? 1 : 3
@@ -336,6 +454,11 @@ final class SettingsViewController: UITableViewController {
                 content.textProperties.color = .systemBlue
             }
         }
+        // The tab row uses its own full-width UISegmentedControl.  Assigning
+        // UIListContentConfiguration here creates a managed content view on top
+        // of the custom subview, hiding it and swallowing touches.
+        if indexPath.section == Section.controls.rawValue,
+           controlsRows[indexPath.row] == .tab { return cell }
         cell.contentConfiguration = content
         return cell
     }
@@ -344,7 +467,8 @@ final class SettingsViewController: UITableViewController {
         tableView.deselectRow(at: indexPath, animated: true)
         if indexPath.section == Section.device.rawValue, indexPath.row == 1 { sendLog(); return }
         if indexPath.section == Section.device.rawValue, indexPath.row == 2 { shareLogs(from: tableView.cellForRow(at: indexPath)); return }
-        if indexPath.section == Section.controls.rawValue, indexPath.row == 7 { editLayout?(); return }
+        if indexPath.section == Section.controls.rawValue,
+           controlsRows[indexPath.row] == .editLayout { editLayout?(); return }
         if indexPath.section == Section.mode.rawValue {
             guard indexPath.row < GameMode.allCases.count else { return }
             settings.gameMode = GameMode.allCases[indexPath.row]
@@ -562,6 +686,36 @@ final class SettingsViewController: UITableViewController {
     }
     private func reloadFooters() {
         UIView.performWithoutAnimation { tableView.reloadSections([Section.graphics.rawValue], with: .none) }
+    }
+    /// Compact slider plus a live numeric readout; unlike a secondaryText
+    /// snapshot the displayed value follows the finger without reloading rows.
+    private func sensitivitySlider(_ value: Double, low: Double, high: Double,
+                                   label: String, changed: @escaping (Double) -> Void) -> UIView {
+        let view = UIStackView()
+        view.axis = .horizontal
+        view.alignment = .center
+        view.spacing = 7
+        view.frame.size = CGSize(width: 175, height: 32)
+        let slider = UISlider()
+        slider.minimumValue = Float(low)
+        slider.maximumValue = Float(high)
+        slider.value = Float(value)
+        slider.accessibilityLabel = label
+        let number = UILabel()
+        number.text = String(format: "%.1f×", value)
+        number.font = .monospacedDigitSystemFont(ofSize: 12, weight: .medium)
+        number.textColor = .secondaryLabel
+        number.textAlignment = .right
+        number.widthAnchor.constraint(equalToConstant: 43).isActive = true
+        slider.addAction(UIAction { [weak slider, weak number] _ in
+            guard let slider else { return }
+            let rounded = (Double(slider.value) * 10).rounded() / 10
+            number?.text = String(format: "%.1f×", rounded)
+            changed(rounded)
+        }, for: .valueChanged)
+        view.addArrangedSubview(slider)
+        view.addArrangedSubview(number)
+        return view
     }
     private func slider(_ value: Double, _ low: Float, _ high: Float, label: String, changed: @escaping (Double) -> Void) -> UISlider {
         let control = UISlider()

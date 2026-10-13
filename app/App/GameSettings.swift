@@ -62,6 +62,57 @@ final class GameSettings {
         get { defaults.object(forKey: "controlScale") as? Double ?? 1.0 }
         set { defaults.set(min(max(newValue, 0.7), 1.5), forKey: "controlScale") }
     }
+    // Independent experimental controls; original v1.3 stick is the default.
+    // Do not conflate swipes with input device classification: the mouse path
+    // is intentionally tested as a separate option, not assumed to retain auto-aim.
+    enum CameraTouchMode: Int, CaseIterable {
+        case stick = 0
+        case swipePad = 1
+        case swipeMouse = 2
+
+        var title: String {
+            switch self {
+            case .stick: return AppLanguage.choose("Virtual right stick")
+            case .swipePad: return AppLanguage.choose("Swipe (controller)")
+            case .swipeMouse: return AppLanguage.choose("Swipe (mouse experiment)")
+            }
+        }
+    }
+    var cameraTouchMode: CameraTouchMode {
+        get { CameraTouchMode(rawValue: defaults.integer(forKey: "cameraTouchMode")) ?? .stick }
+        set {
+            defaults.set(newValue.rawValue, forKey: "cameraTouchMode")
+            // Remember the chosen swipe variant while the user switches to the
+            // controller tab. Never overwrite it when selecting the stick.
+            if newValue != .stick { defaults.set(newValue.rawValue, forKey: "preferredSwipeMode") }
+        }
+    }
+    var preferredSwipeMode: CameraTouchMode {
+        let saved = CameraTouchMode(rawValue: defaults.integer(forKey: "preferredSwipeMode"))
+        return saved == .swipePad ? .swipePad : .swipeMouse
+    }
+    static let swipeSensitivityMinimum = 0.2
+    static let swipeSensitivityMaximum = 9.0
+    static let swipeSensitivityDefault = 3.0
+    var swipeLookSensitivity: Double {
+        get { defaults.object(forKey: "swipeLookSensitivity") as? Double ?? Self.swipeSensitivityDefault }
+        set { defaults.set(min(max(newValue, Self.swipeSensitivityMinimum), Self.swipeSensitivityMaximum), forKey: "swipeLookSensitivity") }
+    }
+    var swipeAimSensitivity: Double {
+        get { defaults.object(forKey: "swipeAimSensitivity") as? Double ?? Self.swipeSensitivityDefault }
+        set { defaults.set(min(max(newValue, Self.swipeSensitivityMinimum), Self.swipeSensitivityMaximum), forKey: "swipeAimSensitivity") }
+    }
+
+    // Mouse look uses direct relative pixels, so its default should be 1x,
+    // independent of the stronger gain needed to drive an analog right stick.
+    var mouseLookSensitivity: Double {
+        get { defaults.object(forKey: "mouseLookSensitivity") as? Double ?? 1.0 }
+        set { defaults.set(min(max(newValue, Self.swipeSensitivityMinimum), Self.swipeSensitivityMaximum), forKey: "mouseLookSensitivity") }
+    }
+    var mouseAimSensitivity: Double {
+        get { defaults.object(forKey: "mouseAimSensitivity") as? Double ?? 1.0 }
+        set { defaults.set(min(max(newValue, Self.swipeSensitivityMinimum), Self.swipeSensitivityMaximum), forKey: "mouseAimSensitivity") }
+    }
     var lookSensitivity: Double {
         get { defaults.object(forKey: "lookSensitivity") as? Double ?? 2.0 }
         set { defaults.set(min(max(newValue, 0.3), 3), forKey: "lookSensitivity") }

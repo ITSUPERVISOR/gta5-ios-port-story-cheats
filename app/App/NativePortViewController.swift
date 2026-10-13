@@ -17,6 +17,10 @@ final class NativePortViewController: UIViewController, MTKViewDelegate {
     private var queue: MTLCommandQueue?
     private let output = UITextView()
     private let fpsLabel = UILabel()
+    private let inputTestLabel = UILabel()
+    private var wasMouseSwipeActive = false
+    private var lastDeviceDiagnostic = ""
+    private var lastDeviceLogAt: CFTimeInterval = 0
     private var lastFPSLabelUpdate: CFTimeInterval = 0
     /// The start screen; it hides once the game's world is up.
     private lazy var home = HomeView(modes: GameMode.allCases.map { ($0.title, $0 == .story ? "book.fill" : "map.fill") }, log: output)
@@ -152,6 +156,16 @@ final class NativePortViewController: UIViewController, MTKViewDelegate {
         fpsLabel.accessibilityLabel = "Game frame rate"
         fpsLabel.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(fpsLabel)
+        inputTestLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .semibold)
+        inputTestLabel.textColor = .white
+        inputTestLabel.backgroundColor = UIColor.black.withAlphaComponent(0.6)
+        inputTestLabel.layer.cornerRadius = 6
+        inputTestLabel.clipsToBounds = true
+        inputTestLabel.textAlignment = .center
+        inputTestLabel.isUserInteractionEnabled = false
+        inputTestLabel.isHidden = true
+        inputTestLabel.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(inputTestLabel)
         touchControls.translatesAutoresizingMaskIntoConstraints = false
         touchControls.isHidden = true
         touchControls.inputChanged = { [weak self] in self?.pollController() }
@@ -164,6 +178,9 @@ final class NativePortViewController: UIViewController, MTKViewDelegate {
             self.setNeedsUpdateOfPrefersPointerLocked()
         }
         view.addSubview(touchControls)
+        // Diagnostics overlay sits over the transparent gesture surface but
+        // cannot intercept touches (isUserInteractionEnabled=false).
+        view.bringSubviewToFront(inputTestLabel)
         NSLayoutConstraint.activate([
             touchControls.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             touchControls.trailingAnchor.constraint(equalTo: view.trailingAnchor),
@@ -174,7 +191,11 @@ final class NativePortViewController: UIViewController, MTKViewDelegate {
             fpsLabel.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 12),
             fpsLabel.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
             fpsLabel.widthAnchor.constraint(equalToConstant: 68),
-            fpsLabel.heightAnchor.constraint(equalToConstant: 24)
+            fpsLabel.heightAnchor.constraint(equalToConstant: 24),
+            inputTestLabel.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 12),
+            inputTestLabel.topAnchor.constraint(equalTo: fpsLabel.bottomAnchor, constant: 5),
+            inputTestLabel.widthAnchor.constraint(equalToConstant: 210),
+            inputTestLabel.heightAnchor.constraint(equalToConstant: 23)
         ])
         NSLayoutConstraint.activate([
             metalView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
@@ -752,6 +773,9 @@ final class NativePortViewController: UIViewController, MTKViewDelegate {
             touchControls.reset(publish: false)
             lastControllerPoll = nil
             PGUpdateVirtualPad(PGPadState())
+            PGSetMouseFocus(false, false)
+            wasMouseSwipeActive = false
+            inputTestLabel.isHidden = true
             return
         }
         let now = CACurrentMediaTime()
@@ -817,6 +841,12 @@ final class NativePortViewController: UIViewController, MTKViewDelegate {
                 if wanted.contains("help") { hints.helpShown = true; hints.helpContext = true }
             }
             touchControls.updateHints(hints)
+            // Deliberately let the native game decide if relative mouse motion
+            // disables assisted targeting. Never force the last-device flag.
+            let mouseSwipe = touchControls.experimentalMouseLookActive && !hasController && !pcControls
+            if mouseSwipe { PGSetMouseFocus(true, true) }
+            else if wasMouseSwipeActive { PGSetMouseFocus(true, false) }
+            wasMouseSwipeActive = mouseSwipe
             let touch = touchControls.padState(elapsed: elapsed)
             if ProcessInfo.processInfo.arguments.contains("--trace-touch-controls") {
                 let sample = String(format: "Touch pad: buttons=%u move=%.2f,%.2f look=%.2f,%.2f triggers=%.2f,%.2f device=%d", touch.buttons, touch.leftX, touch.leftY, touch.rightX, touch.rightY, touch.leftTrigger, touch.rightTrigger, PGLastInputDevice())
@@ -840,6 +870,26 @@ final class NativePortViewController: UIViewController, MTKViewDelegate {
         keys.padButtons = keyButtons
         state.merge(keys)
         #endif
+        if !touchActive && wasMouseSwipeActive {
+            PGSetMouseFocus(true, false)
+            wasMouseSwipeActive = false
+        }
+        if engineStarted && touchActive && GameSettings.shared.cameraTouchMode != .stick {
+            let device = PGLastInputDevice()
+            let mode = PGTargetingMode()
+            let text = "\(device == -4 ? "MOUSE" : (0...3).contains(device) ? "PAD" : "UNKNOWN") \(device) | Aim \(mode)"
+            inputTestLabel.text = "  " + text + "  "
+            inputTestLabel.isHidden = false
+            let key = "\(GameSettings.shared.cameraTouchMode.rawValue):\(text):\(touchControls.aiming)"
+            if key != lastDeviceDiagnostic && now - lastDeviceLogAt > 0.25 {
+                lastDeviceDiagnostic = key
+                lastDeviceLogAt = now
+                appendLog("Swipe input: \(key)")
+            }
+        } else {
+            inputTestLabel.isHidden = true
+            lastDeviceDiagnostic = ""
+        }
         // Optional gyro: phone rotation adds to the right stick.
         let settings = GameSettings.shared
         let onFoot = vehicle == 0

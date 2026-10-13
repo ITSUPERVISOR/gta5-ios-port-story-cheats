@@ -232,6 +232,73 @@ final class TouchControlsView: UIView {
     private let lookStick = FloatingStick()
     /// Where a finger pressed Aim/Fire; dragging from there works as a stick.
     private var dragOrigins: [ObjectIdentifier: (start: CGPoint, current: CGPoint)] = [:]
+    // Each finger keeps its original role from touchesBegan. Only a look-role
+    // finger, or a right-hand Aim/Fire drag, is allowed to queue camera travel.
+    private var pendingCameraTravel = CGPoint.zero
+    private var fractionalMousePixels = CGPoint.zero
+    private var lastCameraMode: GameSettings.CameraTouchMode = .stick
+    private var cameraSwipeAvailable: Bool {
+        context != .menu && !phoneDock && !gamePhoneOut && !promptActive && !context.flying
+    }
+    private var swipeCameraEnabled: Bool {
+        GameSettings.shared.cameraTouchMode != .stick && cameraSwipeAvailable
+    }
+    private func isSelectionWheel(_ role: Role) -> Bool {
+        switch role {
+        case .weaponWheel, .characterWheel, .radioWheel: return true
+        default: return false
+        }
+    }
+    /// Only the experimental mouse path needs pointer focus/lock.
+    var experimentalMouseLookActive: Bool {
+        swipeCameraEnabled && GameSettings.shared.cameraTouchMode == .swipeMouse && !has(isSelectionWheel)
+    }
+    private func clearCameraTravel() {
+        pendingCameraTravel = .zero
+        fractionalMousePixels = .zero
+        PGClearCameraSwipe()
+    }
+    private func trackCameraSwipe(from previous: CGPoint, to point: CGPoint) {
+        guard swipeCameraEnabled, !has(isSelectionWheel) else { return }
+        pendingCameraTravel.x += point.x - previous.x
+        pendingCameraTravel.y += point.y - previous.y
+    }
+    /// Flush only after the gesture roles have been reconciled, before sending
+    /// the pad. The mouse path feeds native mouse deltas but does not replace
+    /// the virtual pad, so we can observe whether the game still grants aim assist.
+    private func flushCameraTravel() {
+        let mode = GameSettings.shared.cameraTouchMode
+        if mode != lastCameraMode { clearCameraTravel(); lastCameraMode = mode }
+        guard swipeCameraEnabled, !has(isSelectionWheel) else {
+            clearCameraTravel()
+            return
+        }
+        let settings = GameSettings.shared
+        let gain = CGFloat(mode == .swipeMouse
+            ? (aiming ? settings.mouseAimSensitivity : settings.mouseLookSensitivity)
+            : (aiming ? settings.swipeAimSensitivity : settings.swipeLookSensitivity))
+        let raw = CGPoint(x: pendingCameraTravel.x * gain, y: pendingCameraTravel.y * gain)
+        pendingCameraTravel = .zero
+        guard raw != .zero else { return }
+        switch mode {
+        case .stick: break
+        case .swipePad:
+            // Existing proven engine-thread bridge expects rightY positive up.
+            PGQueueCameraSwipe(Float(raw.x), Float(-raw.y))
+        case .swipeMouse:
+            // UIKit is Y-down, matching the engine's relative mouse pixels.
+            // Preserve subpixel movement so very slow aiming is not lost.
+            // Drop rather than defer an abnormally large single-frame jump:
+            // deferred overflow would look like camera glide after finger-up.
+            let total = CGPoint(x: max(-1600, min(1600, raw.x + fractionalMousePixels.x)),
+                                y: max(-1600, min(1600, raw.y + fractionalMousePixels.y)))
+            let dx = Int32(total.x.rounded(.towardZero))
+            let dy = Int32(total.y.rounded(.towardZero))
+            fractionalMousePixels = CGPoint(x: total.x - CGFloat(dx), y: total.y - CGFloat(dy))
+            if dx != 0 || dy != 0 { PGMouseInput(dx, dy, 0) }
+        }
+    }
+
     private var sprintSince: CFTimeInterval?
     private var aimToggled = false
     private var lastFireTime: CFTimeInterval = 0
@@ -664,12 +731,16 @@ final class TouchControlsView: UIView {
                 if !has(isLook) { roles[id] = .look; lookStick.begin(at: point) }
             } else if context.flying, leftZone {
                 if !has(isStick) { roles[id] = .moveStick; moveStick.begin(at: point) }
-            } else if leftZone, point.y > safe.minY + safe.height * 0.2, !has(isStick) {
-                roles[id] = context.driving ? .steer : .moveStick
-                moveStick.begin(at: point)
+            } else if leftZone {
+                // In swipe modes the entire left side is reserved for movement;
+                // even a second left finger must not become a camera gesture.
+                if point.y > safe.minY + safe.height * 0.2, !has(isStick) {
+                    roles[id] = context.driving ? .steer : .moveStick
+                    moveStick.begin(at: point)
+                }
             } else if !has(isLook) {
                 roles[id] = .look
-                lookStick.begin(at: point)
+                if !swipeCameraEnabled { lookStick.begin(at: point) }
             }
         }
         publish()
@@ -684,14 +755,17 @@ final class TouchControlsView: UIView {
         defer { if case .fireLook = roles[id] { dragOrigins[id] = (point, point) } }
         switch button {
         case weapons:
+            clearCameraTravel()
             roles[id] = .weaponWheel(start: point, current: point)
             updateVisibility()
         case radio where context.driving:
+            clearCameraTravel()
             roles[id] = .radioWheel(start: point, current: point, since: now)
         case special:
             // L3 + R3 together, fresh presses within the game's 100 ms window; again to stop.
             pulse([.l3, .r3], for: 0.13)
         case switcher:
+            clearCameraTravel()
             roles[id] = .characterWheel(start: point, current: point)
         case fire, driveBy:
             roles[id] = .fireLook(button)
@@ -733,6 +807,7 @@ final class TouchControlsView: UIView {
             let id = ObjectIdentifier(touch)
             guard let role = roles[id] else { continue }
             let point = touch.location(in: self)
+            let previous = touch.previousLocation(in: self)
             switch role {
             case .moveStick:
                 moveStick.move(to: point)
@@ -742,8 +817,13 @@ final class TouchControlsView: UIView {
             case .radioWheel(let start, _, let since):
                 roles[id] = .radioWheel(start: start, current: point, since: since)
             case .look:
-                lookStick.move(to: point)
-            case .fireLook:
+                if swipeCameraEnabled {
+                    trackCameraSwipe(from: previous, to: point)
+                } else {
+                    lookStick.move(to: point)
+                }
+            case .fireLook(let button):
+                if button !== leftFire { trackCameraSwipe(from: previous, to: point) }
                 if let origin = dragOrigins[id] { dragOrigins[id] = (origin.start, point) }
             case .weaponWheel(let start, _):
                 roles[id] = .weaponWheel(start: start, current: point)
@@ -798,6 +878,7 @@ final class TouchControlsView: UIView {
     }
 
     func reset(publish: Bool = true, keepStickFinger: Bool = false) {
+        clearCameraTravel()
         for (id, role) in roles {
             switch role {
             case .moveStick, .steer:
@@ -832,6 +913,7 @@ final class TouchControlsView: UIView {
         var state = PGPadState()
         var held = PadButtons()
         let now = CACurrentMediaTime()
+        flushCameraTravel()
 
         // Camera stick: holding the thumb off-centre keeps turning. Drags from
         // Aim/Fire count the same way, measured from where they pressed.
@@ -843,8 +925,10 @@ final class TouchControlsView: UIView {
             if length > 1 { v.x /= length; v.y /= length }
             if hypot(v.x, v.y) > hypot(look.x, look.y) { look = v }
         }
-        let speed = CGFloat(aimActive ? GameSettings.shared.aimSensitivity : GameSettings.shared.lookSensitivity)
-        (state.rightX, state.rightY) = Self.cameraStick(look, speed: speed)
+        if !swipeCameraEnabled {
+            let speed = CGFloat(aimActive ? GameSettings.shared.aimSensitivity : GameSettings.shared.lookSensitivity)
+            (state.rightX, state.rightY) = Self.cameraStick(look, speed: speed)
+        }
 
         switch context {
         case .onFoot:
