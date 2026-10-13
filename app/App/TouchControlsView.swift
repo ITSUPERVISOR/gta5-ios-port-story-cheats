@@ -352,14 +352,15 @@ final class TouchControlsView: UIView {
         if characterSwitchEnabled, playing, [.onFoot, .car, .bike, .boat].contains(context) { list.append(switcher) }
         // In the layout editor every situational button shows, so it can be placed.
         if editing && !context.flying {
-            list += context == .onFoot ? [special, interact, detonate, zoomIn, zoomOut, weaponPrev, weaponNext] : [special, detonate]
+            list += context == .onFoot ? [special, interact, detonate, zoomIn, zoomOut, weaponPrev, weaponNext] : [special, interact, detonate]
             return list
         }
         // Situational buttons, shown only while they do something (engine state, PGReadControlHints).
         if playing && !context.flying {
             if hints.specialShown && !aimActive { list.append(special) }
             if hints.canDetonate { list.append(detonate) }
-            if context == .onFoot && hints.helpContext && !aimActive { list.append(interact) }
+            // "Press D-pad right to ..." prompts come in vehicles too (Los Santos Customs, garages).
+            if hints.helpContext && !aimActive { list.append(interact) }
             if context == .onFoot && aimActive { list += [zoomIn, zoomOut] }
             if context == .onFoot && has(isWeaponWheel) { list += [weaponPrev, weaponNext] }
         }
@@ -863,6 +864,7 @@ final class TouchControlsView: UIView {
                 if now - (fireStartedAt ?? now) > 0.12 { held.insert(.r1) }
             }
             if enter.pressed { held.insert(.y) }
+            if interact.pressed { held.insert(.right) }
             if horn.pressed { held.insert(.l3) }
             if lookBack.pressed { held.insert(.r3) }
             if vehicleWeapon.pressed { held.insert(.x) }

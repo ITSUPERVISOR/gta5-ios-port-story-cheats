@@ -46,7 +46,7 @@ final class HomeView: UIView {
         title.adjustsFontSizeToFitWidth = true
         title.minimumScaleFactor = 0.7
         let subtitle = UILabel()
-        subtitle.text = "Fan project · plays your own game files"
+        subtitle.text = "Fan project · plays your own game files · \(Theme.appVersion)"
         subtitle.font = Theme.body(14, .medium)
         subtitle.textColor = Theme.secondaryText
         let titles = UIStackView(arrangedSubviews: [title, subtitle])

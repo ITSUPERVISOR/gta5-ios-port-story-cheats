@@ -71,6 +71,7 @@ run('python3', 'Scripts/prepare_memory_pressure.py')
 shutil.copyfile(options.mirror / 'data/manifest.json', root / 'Resources/manifest.json')
 run('python3', 'Scripts/prepare_virtual_pad.py')
 run('python3', 'Scripts/prepare_movie_wait.py')
+run('python3', 'Scripts/prepare_missing_txd.py')
 run('python3', 'Scripts/prepare_unchecked_memory.py')
 # The BC texture decoder header (MIT): phones without BC texture support get decoded textures.
 bcdec = root / 'Tools/bcdec'

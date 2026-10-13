@@ -570,11 +570,98 @@ static void pg_test_video(w2c_game *instance) {
   w2c_game_f81499(instance, handle);
   char line[120]; snprintf(line, sizeof line, "TEST: video handle %u, the engine was held up %.0f ms.", handle, timeMS(CLOCK_MONOTONIC) - start); pg_log(line);
 }
+void w2c_game_f60322(w2c_game*, u32); // streaming_commands::CommandRequestModel
+u32 w2c_game_f60324(w2c_game*, u32); // streaming_commands::HasModelLoaded
+u32 w2c_game_f61266(w2c_game*, u32, u64, f32, u32, u32, u32); // vehicle_commands::CommandCreateVehicle
+void w2c_game_f57201(w2c_game*, u32, u32, u32); // ped_commands::CommandSetPedIntoVehicle
+// Script commands that create entities need a running script: lends them the "main" script's
+// thread (the active thread is per engine thread, at g1 + 3088). Returns the previous one.
+static uint64_t pg_test_enter_script(w2c_game *instance) {
+  uint64_t *active = pg_pointer(&env, instance->w2c_g1 + 3088, 8), previous = *active;
+  uint64_t threads = *(uint64_t *)pg_pointer(&env, 15409704, 8);
+  uint16_t count = *(uint16_t *)pg_pointer(&env, 15409712, 2);
+  for (uint16_t i = 0; i < count; i++) {
+    uint64_t thread = *(uint64_t *)pg_pointer(&env, threads + 8ull * i, 8);
+    if (thread && !strcmp(pg_string(&env, thread + 428), "main")) { *active = thread; break; }
+  }
+  return previous;
+}
+static void pg_test_leave_script(w2c_game *instance, uint64_t previous) {
+  *(uint64_t *)pg_pointer(&env, instance->w2c_g1 + 3088, 8) = previous;
+}
+// Test (PG_TEST_CAR="x,y,z,heading"): from about 35 s in, puts the player in a car (a Sultan) there.
+static void pg_test_car(w2c_game *instance) {
+  static int frames, driving;
+  // PG_TEST_DRIVE=<frames>: then holds the accelerator at half for that many frames.
+  if (frames < 0 && driving > 0 && --driving >= 0) {
+    PGUpdateVirtualPad((PGPadState){ .rightTrigger = driving ? 0.5f : 0 });
+    if (!driving) pg_log("TEST: released the accelerator.");
+    return;
+  }
+  const char *target = getenv("PG_TEST_CAR");
+  float x, y, z, heading;
+  if (frames < 0 || !target || ++frames < 1050 || sscanf(target, "%f,%f,%f,%f", &x, &y, &z, &heading) != 4) return;
+  const uint32_t model = 970598228u; // joaat("sultan")
+  uint64_t previous = pg_test_enter_script(instance);
+  w2c_game_f60322(instance, model);
+  if (!w2c_game_f60324(instance, model) && frames < 1650) { pg_test_leave_script(instance, previous); return; }
+  frames = -1;
+  uint64_t vector = w2c_game_f100(instance, 32);
+  float *v = pg_pointer(&env, vector, 24); v[0] = x; v[2] = y; v[4] = z;
+  uint32_t vehicle = w2c_game_f61266(instance, model, vector, heading, 0, 0, 1);
+  if (vehicle) w2c_game_f57201(instance, w2c_game_f58715(instance), vehicle, (uint32_t)-1);
+  pg_test_leave_script(instance, previous);
+  if (getenv("PG_TEST_DRIVE")) driving = atoi(getenv("PG_TEST_DRIVE")) + 1;
+  char line[96]; snprintf(line, sizeof line, "TEST: player put in car %u at %.1f, %.1f, %.1f.", vehicle, x, y, z); pg_log(line);
+}
+void w2c_game_f47028(w2c_game*, u64, u64, f32, u32, u32, u32); // CLoadScene::StartFromScript
+u32 w2c_game_f47030(w2c_game*); // CLoadScene::IsLoaded
+u64 w2c_game_f684(w2c_game*, u32, u32); // atHashStringNamespaceSupport::TryGetString
+// Test (PG_TEST_LOADSCENE=start): about 50 s in, starts the frustum load scene Los Santos Customs
+// (carmod_shop) asks for, NEW_LOAD_SCENE_START at (-326.94, -131.75, 38.85).
+static void pg_test_loadscene(w2c_game *instance) {
+  static int frames;
+  const char *mode = getenv("PG_TEST_LOADSCENE");
+  if (frames < 0 || !mode || strcmp(mode, "start") || ++frames < 1500) return;
+  frames = -1;
+  uint64_t vectors = w2c_game_f100(instance, 64);
+  float *v = pg_pointer(&env, vectors, 32);
+  v[0] = -326.94f; v[1] = -131.75f; v[2] = 38.85f; v[3] = 0;
+  v[4] = -0.91f; v[5] = -0.40f; v[6] = 0; v[7] = 0;
+  pg_log("TEST: starting the Los Santos Customs load scene.");
+  w2c_game_f47028(instance, vectors, vectors + 16, 5.0f, 0, 1, 0);
+}
+// PG_TEST_LOADSCENE (any value): logs the load scene's state whenever it changes, and every 5 s.
+static void pg_test_loadscene_monitor(w2c_game *instance) {
+  static char last[200];
+  static double lastTime;
+  if (!getenv("PG_TEST_LOADSCENE")) return;
+  const uint8_t *m = pg_pointer(&env, 0, 23418200);
+  if (m[23389293] != 1) { last[0] = 0; return; }
+  uint32_t state = *(const uint32_t *)(m + 23389296);
+  uint64_t proxy = *(const uint64_t *)(m + 23389344);
+  char name[48] = "-";
+  int proxyState = -1, proxyRequested = -1, proxyFlags = -1;
+  if (proxy) {
+    const uint8_t *p = pg_pointer(&env, proxy, 208);
+    proxyRequested = p[28]; proxyState = p[30]; proxyFlags = *(const uint16_t *)(p + 20);
+    uint64_t text = w2c_game_f684(instance, 0, *(const uint32_t *)(p + 196));
+    if (text) snprintf(name, sizeof name, "%s", pg_string(&env, text));
+  }
+  char line[200];
+  snprintf(line, sizeof line, "LOADSCENE state %u proxy %s (%llx) state %d requested %d flags %x volume %x entities %u bounds %u loaded %u",
+    state, name, (unsigned long long)proxy, proxyState, proxyRequested, proxyFlags, m[23417824],
+    *(const uint16_t *)(m + 23417896), *(const uint16_t *)(m + 23417912), w2c_game_f47030(instance));
+  double now = timeMS(CLOCK_MONOTONIC);
+  if (!strcmp(line, last) && now - lastTime < 5000) return;
+  snprintf(last, sizeof last, "%s", line); lastTime = now;
+  pg_log(line);
+}
 #endif
 void pg_virtual_pad_apply(w2c_game *instance, uint64_t pad) {
   if (pad == 12840656) pg_apply_targeting_mode(instance);
 #if TARGET_OS_SIMULATOR
-  if (pad == 12840656) { pg_test_teleport(instance); pg_test_tv(instance); pg_test_video(instance); }
+  if (pad == 12840656) { pg_test_teleport(instance); pg_test_tv(instance); pg_test_video(instance); pg_test_car(instance); pg_test_loadscene(instance); pg_test_loadscene_monitor(instance); }
 #endif
   if (pad != 12840656 || !atomic_load(&virtualPadActive)) return;
   uint64_t packed = atomic_load(&virtualPad);
@@ -611,6 +698,33 @@ void pg_movie_wait(w2c_game *instance, uint64_t movie) {
     return;
   }
   w2c_game_f135(instance, 1);
+}
+// HAS_STREAMED_TEXTURE_DICT_LOADED (Scripts/prepare_missing_txd.py): the scripts are newer than
+// the game files and some wait for a texture dictionary no archive has (Los Santos Customs waits
+// for "MPShopSale" before its menu). A name missing from the texture dictionary store can never
+// load, so it reports loaded and the script carries on. The store's name map: bucket heads (u32)
+// at 11097512, bucket count at 11097520, entries {hash, slot, next} (3 x u32) at 11097504.
+u32 pg_streamed_txd_loaded(w2c_game *instance, u64 name, u32 hash, u32 loaded) {
+  (void)instance;
+  if (loaded) return loaded;
+  uint32_t buckets = *(uint32_t *)pg_pointer(&env, 11097520, 4);
+  if (!buckets) return 0; // the store isn't set up yet
+  uint64_t heads = *(uint64_t *)pg_pointer(&env, 11097512, 8), entries = *(uint64_t *)pg_pointer(&env, 11097504, 8);
+  uint32_t i = *(uint32_t *)pg_pointer(&env, heads + 4ull * (hash % buckets), 4);
+  for (int steps = 0; i != UINT32_MAX && steps < 100000; steps++) {
+    const uint32_t *entry = pg_pointer(&env, entries + 12ull * i, 12);
+    if (entry[0] == hash) { if (entry[1] != UINT32_MAX) return 0; break; } // known: its real state
+    i = entry[2];
+  }
+  static uint32_t logged[32]; static int loggedCount; // log each name once (script commands run on one thread)
+  bool seen = false;
+  for (int k = 0; k < loggedCount; k++) seen |= logged[k] == hash;
+  if (!seen && loggedCount < 32) {
+    logged[loggedCount++] = hash;
+    char line[160]; snprintf(line, sizeof line, "Texture dictionary \"%.64s\" is not in the game files; scripts waiting for it carry on.", pg_string(&env, name));
+    pg_log(line);
+  }
+  return 1;
 }
 // The core of IS_PAUSE_MENU_ACTIVE (f52482 -> f36254): either frontend flag.
 bool PGPauseMenuActive(void) {

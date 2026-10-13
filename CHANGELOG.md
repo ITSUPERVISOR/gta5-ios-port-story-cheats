@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.3.1
+- **Los Santos Customs works.** Driving in no longer leaves you stuck inside with no menu: the shop waited for a texture the game files don't include. A few labels in the shop may be blank.
+- **Interact shows in vehicles too** when the game asks for it ("Press D-pad right to ...").
+- **The app version shows** under the title on the start screen, in Settings and in the log. Please mention it when you report a problem.
+
 ## v1.3
 - **No more freezes when a TV comes on.** The game waited forever for TV and cutscene videos the game files don't include (Franklin's aunt's house, Michael's house, the Complications intro). Those videos are now skipped.
 - **The minimap shows the map** (it was blank in every earlier version, and in the browser version).

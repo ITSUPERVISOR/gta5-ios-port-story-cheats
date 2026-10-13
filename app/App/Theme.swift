@@ -3,6 +3,11 @@ import UIKit
 /// The look shared by the start screen, the game files screens and Settings: the app icon's sunset
 /// over blue, glass panels on top of the background art, and one warm accent for the main actions.
 enum Theme {
+    /// The app's version as players should quote it in reports, e.g. "v1.3 (6)".
+    static let appVersion: String = {
+        let info = Bundle.main.infoDictionary
+        return "v\(info?["CFBundleShortVersionString"] as? String ?? "?") (\(info?["CFBundleVersion"] as? String ?? "?"))"
+    }()
     static let accent = UIColor(red: 1.0, green: 0.62, blue: 0.18, alpha: 1)        // sunset orange
     static let accentDeep = UIColor(red: 0.95, green: 0.36, blue: 0.16, alpha: 1)
     static let ok = UIColor(red: 0.30, green: 0.85, blue: 0.47, alpha: 1)

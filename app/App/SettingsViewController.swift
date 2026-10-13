@@ -110,7 +110,7 @@ final class SettingsViewController: UITableViewController {
         case .gyro:
             return "Move the phone to fine-tune your aim; turning your body turns the camera. Tilt steering turns the phone like a steering wheel: Assist adds fine control on top of the touch steering, Tilt to steer replaces it. The straight-ahead angle is however you hold the phone when you get in."
         case .files: return filesFooter()
-        case .device: return nil
+        case .device: return "GTA V Port \(Theme.appVersion). Quote this version when you report a problem."
         }
     }
 

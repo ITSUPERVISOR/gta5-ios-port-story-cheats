@@ -197,6 +197,7 @@ final class NativePortViewController: UIViewController, MTKViewDelegate {
             try? FileManager.default.moveItem(at: logFile!, to: previous)
         }
         try? Data().write(to: logFile!)
+        appendLog("GTA V Port \(Theme.appVersion) on iOS \(UIDevice.current.systemVersion)")
         appendLog("Native UIKit + Metal host. Engine compiled into the app; no WebView or JIT.")
         appendLog("Metal device: \(device?.name ?? "unavailable")")
         GameFolder.log = { [weak self] line in self?.appendLog(line) }
