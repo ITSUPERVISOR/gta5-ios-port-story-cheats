@@ -55,7 +55,11 @@ Open **SideStore** or **AltStore**, go to **My Apps**, tap **+** and pick `GTA5P
 
 **Easiest:** open the app once, then in the Files app long-press your game folder, tap **Move**, and choose **On My iPhone › GTA V Port**. Moving within On My iPhone is instant. Open the app again: it finds the game by itself, at any depth (a `mirror/playgta5.com/…` folder works as is).
 
-**Or pick it:** in the app tap **Game files › Pick a folder on this iPhone** and tap **Open** while you are *in* the folder that has `data` and `b` inside (or any folder above it). Not inside `b` or `data`.
+**Or pick it:** in the app tap the **Game files** card, then **Choose a folder…**, and open any folder that has your game somewhere inside (even On My iPhone itself). The app searches it.
+
+**Only have the zip or rar?** The app can unpack it for you: on the **Game files** screen, paste a direct link to it (or a download page; it opens in a built-in browser and takes the download over), or choose the archive in Files. It unpacks as it downloads, so you need about 21 GB free, not double.
+
+Whichever way, the app checks every game file before you play and tells you exactly what's missing or damaged.
 
 Then choose **Story mode** (the campaign, with saves) or **Sandbox** (free roam) and press **Play**.
 
