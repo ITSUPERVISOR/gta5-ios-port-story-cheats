@@ -1,5 +1,30 @@
 # Changelog
 
+## v1.3.2
+- **Fewer missing and blurry textures.** The app used much more memory for textures than the game planned for, so the game threw detailed textures away to stay under the limit.
+  - iPads and Macs with Apple chips keep textures compressed: 2 to 8 times less texture memory.
+  - iPhones store the most common texture type at half the size.
+  - A spare copy of every texture is no longer kept in memory.
+  - The game stops loading new detail a little before the memory limit instead of loading and dropping the same textures over and over.
+- **13 languages** for the app's menus (English, French, Italian, German, Spanish, Latin American Spanish, Japanese, Korean, Polish, Brazilian Portuguese, Russian, Simplified and Traditional Chinese). The game itself switches language the next time it starts. Thanks to GitHub user @k49kg9xmsd-prog (#4).
+- **Swipe to look** (Settings › Controls › Camera): swipe anywhere to move the camera. It moves the game's mouse, so it is smooth in every direction. Sensitivity goes up to 15x, 5x by default. Thanks to GitHub user @k49kg9xmsd-prog (#4).
+- **Pause map:** drag on the left side of the screen to move the cursor and set a waypoint anywhere, not only on places in the legend.
+- **Shop menus** (Ammu-Nation, clothes and others) show the D-pad so you can move through them.
+- **New vehicle buttons:**
+  - Tow trucks: tow hook, and Raise and Lower for the tow arm.
+  - Convertibles: roof up and down.
+- **Switching aircraft weapons** no longer opens the radio wheel.
+- **GTA VI test map** gets the phone, cheats and free roam, and puts you back on land if you fall off the map.
+- **Fixed a crash on two fences in the Vinewood Hills** ("Invalid fixup").
+- Fixed a crash when pedestrians spawn at a crowded spot.
+- The Replay editor no longer says there's no space left.
+- Props no longer flicker in the first time you see them.
+- Thanks to tomergamertv on Telegram for the last three.
+- **New start screen and Settings background.**
+- **FPS counter switch** in Settings › Graphics.
+- **Settings shows whether extra memory is on** for your install, next to the memory limit.
+- Logs say more: the app version, where your game files are, free storage and memory, and which engine function a crash happened in.
+
 ## v1.3.1
 - **Los Santos Customs works.** Driving in no longer leaves you stuck inside with no menu: the shop waited for a texture the game files don't include. A few labels in the shop may be blank.
 - **Interact shows in vehicles too** when the game asks for it ("Press D-pad right to ...").

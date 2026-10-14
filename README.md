@@ -1,12 +1,8 @@
 # GTA V on iPhone (5★ Port)
 
-> [!TIP]
-> **🆕 New in v1.2: build the app right from your iPhone, no computer needed.**
-> Open **[fivestarport.vercel.app](https://fivestarport.vercel.app)**, sign in with GitHub, pick three files, and about 25 minutes later your app is ready to install. Free.
-
-### Watch the 3-minute tutorial
-
-https://github.com/user-attachments/assets/1efff2dc-675e-473d-b988-0c23784404ed
+> [!IMPORTANT]
+> **📢 Everything you'll need is in the [Five Star Port Telegram](https://t.me/fivestarport).**
+> Every new release, step-by-step help, answers to the common questions and a community that has been through the setup already. Questions about files, installs or builds are answered there, not by email or DM.
 
 A fan project that runs the WebAssembly build of GTA V natively on iPhone: the engine compiled to ARM64, a native Metal renderer with every shader precompiled, Story mode or free-roam Sandbox, touch controls that act as a real controller (with the game's own aim assist), gyro aiming, tilt steering and graphics presets up to near-native resolution.
 
@@ -36,6 +32,10 @@ Any way that gets the folder there works, for example:
 - **With a cable**, once the app is installed (step 3): Finder on a Mac, or the Apple Devices app on Windows. Select your iPhone, open **Files**, and drag the folder onto **GTA V Port**. It then shows up in Files under On My iPhone › GTA V Port.
 
 ### 2. Build your app with 5★ Port Builder
+
+**Watch the 3-minute tutorial:**
+
+https://github.com/user-attachments/assets/1efff2dc-675e-473d-b988-0c23784404ed
 
 Open **[fivestarport.vercel.app](https://fivestarport.vercel.app)** on your iPhone and follow the steps:
 1. **Connect GitHub.** The builder makes a private copy of this repository in your account. GitHub asks you to approve it once; keep "All repositories" selected.
@@ -103,7 +103,7 @@ See [CHANGELOG.md](CHANGELOG.md) for every version.
 
 ## Community and help
 
-**[Five Star Port on Telegram](https://t.me/fivestarport)** is the place for help with installs, build logs and discussing issues. It's an unofficial, community-run group and I don't read it much myself. If you need me urgently, DM me on X: [@kevinerikjs](https://x.com/kevinerikjs).
+**[Five Star Port on Telegram](https://t.me/fivestarport)** has everything: every new release as it comes out, help with installs and builds, and a community that has solved most problems before. Please ask there instead of by email or DM.
 
 Bugs can also go to this repository's [Issues](https://github.com/kevinerikjs/gta5-ios-port/issues). Please attach your log from Settings › Share log.
 
