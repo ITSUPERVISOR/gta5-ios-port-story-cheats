@@ -44,6 +44,8 @@ final class NativePortViewController: UIViewController, MTKViewDelegate {
     private var healthTimer: Timer?
     private var lastHealth: [UInt64] = [0, 0, 0, 0, 0, 0, 0, 0]
     private var padProof: PGPadState?
+    /// Bumps when a new story-cheat sequence starts, so an older one stops writing the pad.
+    private var storyCheatToken = 0
     private var lastGameStatus: UInt32 = 999
     private var worldReadyAt: CFTimeInterval?
     private var tiltNeutral: Double?
@@ -484,6 +486,39 @@ final class NativePortViewController: UIViewController, MTKViewDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + at + 0.5) { self.padProof = nil; self.appendLog("Pad script: done") }
     }
 
+    /// Presses one of the game's own controller cheat sequences, then gives the pad back.
+    private func playStoryCheat(_ cheat: StoryCheat) {
+        let status = PGGameStatus()
+        if PGPauseMenuActive() || (status & (1 | 4 | 8 | 16)) != 0 {
+            appendLog("Story cheat skipped (\(cheat.title)): pause menu, cutscene, or no player.")
+            return
+        }
+        storyCheatToken += 1
+        let token = storyCheatToken
+        appendLog("Story cheat: \(cheat.title)")
+        var at = 0.4
+        let hold = 0.09
+        let gap = 0.07
+        for input in cheat.inputs {
+            let state = input.state
+            DispatchQueue.main.asyncAfter(deadline: .now() + at) { [weak self] in
+                guard let self, self.storyCheatToken == token else { return }
+                self.padProof = state
+            }
+            at += hold
+            DispatchQueue.main.asyncAfter(deadline: .now() + at) { [weak self] in
+                guard let self, self.storyCheatToken == token else { return }
+                self.padProof = PGPadState()
+            }
+            at += gap
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + at + 0.15) { [weak self] in
+            guard let self, self.storyCheatToken == token else { return }
+            self.padProof = nil
+            self.appendLog("Story cheat entered: \(cheat.title)")
+        }
+    }
+
     /// Simulator proof that the engine accepts the virtual controller and
     /// that controller aiming locks on: walk, pick a gun from the wheel, aim.
     private func verifyVirtualPad() {
@@ -754,6 +789,7 @@ final class NativePortViewController: UIViewController, MTKViewDelegate {
         controller.controlsChanged = { [weak self] in self?.touchControls.updateVisibility() }
         controller.editLayout = { [weak self] in self?.showLayoutEditor() }
         controller.targetingChanged = { PGSetTargetingMode(Int32(GameSettings.shared.targetingMode)) }
+        controller.cheatSelected = { [weak self] cheat in self?.playStoryCheat(cheat) }
         let navigation = UINavigationController(rootViewController: controller)
         Theme.styleNavigation(navigation)
         present(navigation, animated: true)

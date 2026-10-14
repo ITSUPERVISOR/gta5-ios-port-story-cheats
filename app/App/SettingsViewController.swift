@@ -13,8 +13,9 @@ final class SettingsViewController: UITableViewController {
     var editLayout: (() -> Void)?
     var targetingChanged: (() -> Void)?
     var gameModeChanged: (() -> Void)?
+    var cheatSelected: ((StoryCheat) -> Void)?
 
-    private enum Section: Int, CaseIterable { case language, mode, graphics, controls, gyro, files, device }
+    private enum Section: Int, CaseIterable { case language, mode, graphics, controls, cheats, gyro, files, device }
     // The switch controls both the visible settings group and the active
     // camera input. It does NOT spoof the engine's last-input-device flag:
     // that flag is shared by the game's own aim-assist logic.
@@ -111,6 +112,7 @@ final class SettingsViewController: UITableViewController {
         case .mode: return GameMode.allCases.count + (settings.gameModeChoice == .sandbox ? 1 : 0)
         case .graphics: return settings.tier.allowed.count + 4
         case .controls: return controlsRows.count
+        case .cheats: return engineRunning ? StoryCheats.all.count : 0
         case .gyro: return (settings.gyroAim == .off ? 1 : 3) + (settings.tiltSteer == .off ? 1 : 2)
         case .files: return fileRows.count
         case .device: return 3
@@ -126,7 +128,8 @@ final class SettingsViewController: UITableViewController {
     }
 
     override func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
-        [AppLanguage.choose("Language"), AppLanguage.choose("Game mode"), AppLanguage.choose("Graphics"), AppLanguage.choose("Touch controls"), AppLanguage.choose("Gyro"), AppLanguage.choose("Game files"), AppLanguage.choose("This device")][section]
+        if Section(rawValue: section) == .cheats, !engineRunning { return nil }
+        return [AppLanguage.choose("Language"), AppLanguage.choose("Game mode"), AppLanguage.choose("Graphics"), AppLanguage.choose("Touch controls"), AppLanguage.choose("Story cheats"), AppLanguage.choose("Gyro"), AppLanguage.choose("Game files"), AppLanguage.choose("This device")][section]
     }
 
     override func tableView(_ tableView: UITableView, titleForFooterInSection section: Int) -> String? {
@@ -146,6 +149,10 @@ final class SettingsViewController: UITableViewController {
             return text
         case .controls:
             return AppLanguage.choose("Switching tabs changes the camera control and the settings below. It does not force GTA V's in-game button prompt icons.")
+        case .cheats:
+            return engineRunning
+                ? AppLanguage.choose("The game's own story cheats. This screen closes and the buttons are pressed for you. Stand still, not in a cutscene or the pause menu. Works in Story mode and Sandbox.")
+                : nil
         case .gyro:
             return AppLanguage.choose("Move the phone to fine-tune your aim; turning your body turns the camera. Tilt steering turns the phone like a steering wheel: Assist adds fine control on top of the touch steering, Tilt to steer replaces it. The straight-ahead angle is however you hold the phone when you get in.")
         case .files: return filesFooter()
@@ -347,6 +354,10 @@ final class SettingsViewController: UITableViewController {
                 let kind = device == -4 ? AppLanguage.choose("Mouse/keyboard") : (0...3).contains(device) ? AppLanguage.choose("Controller") : AppLanguage.choose("Unknown")
                 content.secondaryText = AppLanguage.interpolate(AppLanguage.choose("{arg0} [{arg1}] · Aim mode: {arg2}"), [kind, String(device), String(PGTargetingMode())])
             }
+        case .cheats:
+            let cheat = StoryCheats.all[indexPath.row]
+            content.text = AppLanguage.choose(cheat.title)
+            content.secondaryText = AppLanguage.choose(cheat.detail)
         case .gyro:
             let aimRows = settings.gyroAim == .off ? 1 : 3
             if indexPath.row == aimRows {
@@ -455,6 +466,11 @@ final class SettingsViewController: UITableViewController {
         if indexPath.section == Section.device.rawValue, indexPath.row == 2 { shareLogs(from: tableView.cellForRow(at: indexPath)); return }
         if indexPath.section == Section.controls.rawValue,
            controlsRows[indexPath.row] == .editLayout { editLayout?(); return }
+        if indexPath.section == Section.cheats.rawValue {
+            let cheat = StoryCheats.all[indexPath.row]
+            dismiss(animated: true) { self.cheatSelected?(cheat) }
+            return
+        }
         if indexPath.section == Section.mode.rawValue {
             guard indexPath.row < GameMode.allCases.count else { return }
             settings.gameMode = GameMode.allCases[indexPath.row]
