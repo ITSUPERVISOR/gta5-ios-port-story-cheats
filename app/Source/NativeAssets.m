@@ -10,6 +10,22 @@
 #include "NativePackedAssetCache.h"
 #include "NativeAssetPreload.h"
 
+// A language choice requested by the native app when the WASM engine boots.
+// This does not guarantee the underlying web game uses the locale or has the necessary fonts.
+const char *PGSelectedGameLanguage(void) {
+  NSString *chosen = [[NSUserDefaults standardUserDefaults] stringForKey:@"gtaPortAppLanguage"];
+  static const char *supported[] = {
+    "en-US", "fr-FR", "it-IT", "de-DE", "es-ES", "ja-JP", "ko-KR",
+    "pl-PL", "pt-BR", "ru-RU", "zh-CN", "es-MX", "zh-TW"
+  };
+  if (chosen != nil) {
+    for (size_t i = 0; i < sizeof(supported)/sizeof(supported[0]); ++i) {
+      if ([chosen isEqualToString:[NSString stringWithUTF8String:supported[i]]]) return supported[i];
+    }
+  }
+  return "en-US";
+}
+
 // The server that holds your own copy of the game files (set in the app).
 static NSString *assetServer=@"";
 void PGSetAssetServer(const char *url){
@@ -293,10 +309,44 @@ static int64_t readAssetImpl(uint32_t id,uint64_t offset,uint8_t *destination,ui
 // Health counters for the periodic log line (Settings > Share log).
 static _Atomic uint64_t healthReads,healthReadBytes,healthReadErrors,healthShortReads,healthSlowReads,healthReadMicros;
 void PGAssetHealth(uint64_t out[6]){out[0]=healthReads;out[1]=healthReadBytes;out[2]=healthReadErrors;out[3]=healthShortReads;out[4]=healthSlowReads;out[5]=healthReadMicros;}
+// Sandbox on the GTA VI test map: env_test.meta lists only the testbed script archive (about 20
+// test scripts), so the startup script finds no main, phone or cheat app there. Reads of that
+// file get the GTA V map's script archive plus the cheat-app overlay instead. The engine knows
+// every file's size from the manifest, so the rewrite keeps the size: indentation and carriage
+// returns are dropped and spaces pad the end. A file that doesn't match is left alone.
+static NSData *envTestMeta;
+static NSData *envTestMetaRewrite(NSData *original){
+  NSString *text=[[NSString alloc] initWithData:original encoding:NSUTF8StringEncoding];
+  NSString *testbed=@"\t\t<Item>\r\n\t\t\t<filename>PLATFORM:/LEVELS/TESTBED/SCRIPT/SCRIPT.RPF</filename>\r\n\t\t\t<fileType>RPF_FILE</fileType>\r\n\t\t</Item>\r\n";
+  if(!text||[text componentsSeparatedByString:testbed].count!=2)return nil;
+  NSString *gta5=@"<Item><filename>platform:/levels/gta5/script/script.rpf</filename><fileType>RPF_FILE</fileType></Item>\n"
+    @"<Item><filename>platform:/levels/gta5/script/script_wasm.rpf</filename><fileType>RPF_FILE</fileType><overlay value=\"true\"/></Item>\n";
+  text=[text stringByReplacingOccurrencesOfString:testbed withString:gta5];
+  text=[[text stringByReplacingOccurrencesOfString:@"\t" withString:@""] stringByReplacingOccurrencesOfString:@"\r" withString:@""];
+  NSMutableData *out=[[text dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];
+  if(out.length>original.length)return nil;
+  NSMutableData *pad=[NSMutableData dataWithLength:original.length-out.length];memset(pad.mutableBytes,' ',pad.length);
+  [out appendData:pad];return out;
+}
+static void envTestMetaOverlay(uint32_t id,uint64_t offset,uint8_t *destination,int64_t count){
+  if(count<=0||![assetFiles[id][0] isEqualToString:@"common/data/levels/env_test/env_test.meta"])return;
+  @synchronized([NSNull null]) {
+    if(!envTestMeta){
+      uint64_t size=[assetFiles[id][1] unsignedLongLongValue];
+      NSMutableData *original=[NSMutableData dataWithLength:(NSUInteger)size];
+      NSData *rewritten=readAssetImpl(id,0,original.mutableBytes,(uint32_t)size)==(int64_t)size?envTestMetaRewrite(original):nil;
+      envTestMeta=rewritten?:[NSData data];
+      pg_log(rewritten?"GTA VI test map: using the GTA V map's scripts (phone, cheats, free roam).":"GTA VI test map: its level file is not the expected one; the test scripts stay.");
+    }
+    if(envTestMeta.length&&offset<envTestMeta.length)
+      memcpy(destination,(const uint8_t *)envTestMeta.bytes+offset,(size_t)MIN((uint64_t)count,envTestMeta.length-offset));
+  }
+}
 static int64_t readAsset(uint32_t id,uint64_t offset,uint8_t *destination,uint32_t length){
   assetReadNetworkMS=assetReadLockMS=0;assetReadNetworkBytes=0;assetReadSource=2;
   double healthStart=assetNowMS();
   double start=assetTimingFD>=0?healthStart:0;int64_t result=readAssetImpl(id,offset,destination,length);
+  envTestMetaOverlay(id,offset,destination,result);
   double took=assetNowMS()-healthStart;
   atomic_fetch_add(&healthReads,1);atomic_fetch_add(&healthReadMicros,(uint64_t)(took*1000));
   if(result<0)atomic_fetch_add(&healthReadErrors,1);

@@ -48,6 +48,7 @@ typedef struct {
   bool helpShown;      // a help message is on screen
   bool helpContext;    // ...and it asks for the context input (D-pad right)
   bool radioWheelOpen; // the radio wheel is up
+  uint32_t vehicleModel; // model name hash (joaat) of the vehicle the player is in, 0 on foot
 } PGControlHints;
 PGControlHints PGReadControlHints(uint32_t touchContext);
 // Keyboard and mouse, through the game's own PC input (the block the browser build wrote): key
@@ -73,6 +74,9 @@ typedef struct {
   float leftX, leftY, rightX, rightY, leftTrigger, rightTrigger;
 } PGPadState;
 void PGUpdateVirtualPad(PGPadState state);
+// Existing controller-swipe impulse bridge, consumed on engine input sampling.
+void PGQueueCameraSwipe(float x, float y);
+void PGClearCameraSwipe(void);
 // The engine's last input device for the player: -4 keyboard/mouse,
 // 0...3 pads, -3 unknown. Assisted aim needs a pad.
 int32_t PGLastInputDevice(void);
@@ -86,4 +90,5 @@ void PGFillAudio(float *left, float *right, uint32_t count);
 // Health counters for the periodic log line.
 uint64_t PGMemoryBudgetQueries(void);
 uint64_t PGMemoryBudgetClamps(void);
+uint64_t PGMemoryBudgetEvictions(void);
 void PGAssetHealth(uint64_t out[6]);

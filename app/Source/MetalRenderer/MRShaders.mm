@@ -148,6 +148,9 @@ id<MTLFunction> shaderFunction(ShaderInfo *info) {
 // ---- formats ----------------------------------------------------------------------------------------------------------
 static const uint32_t BIND_DS = 0x40;
 
+bool gNativeBC = false;
+bool gPackedBC1 = false;
+
 FormatInfo mapFormat(uint32_t f, uint32_t bind) {
 	bool ds = (bind & BIND_DS) != 0;
 	FormatInfo m;
@@ -202,7 +205,19 @@ FormatInfo mapFormat(uint32_t f, uint32_t bind) {
 		logOnce("fmt" + std::to_string(f), "Metal renderer: no format for DXGI %u (using RGBA8)", f);
 		m.format = MTLPixelFormatRGBA8Unorm;
 	}
-	if (m.bc) {		// decoded on the CPU to an uncompressed format
+	if (m.bc && gNativeBC) {		// the GPU samples the blocks directly
+		m.bcNative = true;
+		switch (m.bc) {
+		case 1: m.format = m.srgb ? MTLPixelFormatBC1_RGBA_sRGB : MTLPixelFormatBC1_RGBA; m.alt = m.srgb ? MTLPixelFormatBC1_RGBA : MTLPixelFormatBC1_RGBA_sRGB; break;
+		case 2: m.format = m.srgb ? MTLPixelFormatBC2_RGBA_sRGB : MTLPixelFormatBC2_RGBA; m.alt = m.srgb ? MTLPixelFormatBC2_RGBA : MTLPixelFormatBC2_RGBA_sRGB; break;
+		case 3: m.format = m.srgb ? MTLPixelFormatBC3_RGBA_sRGB : MTLPixelFormatBC3_RGBA; m.alt = m.srgb ? MTLPixelFormatBC3_RGBA : MTLPixelFormatBC3_RGBA_sRGB; break;
+		case 4: m.format = MTLPixelFormatBC4_RUnorm; break;
+		case 5: m.format = MTLPixelFormatBC5_RGUnorm; break;
+		case 6: m.format = MTLPixelFormatBC6H_RGBUfloat; break;
+		default: m.format = m.srgb ? MTLPixelFormatBC7_RGBAUnorm_sRGB : MTLPixelFormatBC7_RGBAUnorm; m.alt = m.srgb ? MTLPixelFormatBC7_RGBAUnorm : MTLPixelFormatBC7_RGBAUnorm_sRGB;
+		}
+	} else if (m.bc) {		// decoded on the CPU to an uncompressed format
+		if (m.bc == 1 && f == 71 && gPackedBC1) { m.format = MTLPixelFormatA1BGR5Unorm; return m; }
 		switch (m.bc) {
 		case 4: m.format = MTLPixelFormatR8Unorm; break;
 		case 5: m.format = MTLPixelFormatRG8Unorm; break;
@@ -225,6 +240,14 @@ MTLPixelFormat viewFormat(uint32_t dxgi, MTLPixelFormat tf) {
 	case MTLPixelFormatRGBA8Unorm_sRGB: return m.srgb ? tf : MTLPixelFormatRGBA8Unorm;
 	case MTLPixelFormatBGRA8Unorm: return m.srgb ? MTLPixelFormatBGRA8Unorm_sRGB : tf;
 	case MTLPixelFormatBGRA8Unorm_sRGB: return m.srgb ? tf : MTLPixelFormatBGRA8Unorm;
+	case MTLPixelFormatBC1_RGBA: return m.srgb ? MTLPixelFormatBC1_RGBA_sRGB : tf;
+	case MTLPixelFormatBC1_RGBA_sRGB: return m.srgb ? tf : MTLPixelFormatBC1_RGBA;
+	case MTLPixelFormatBC2_RGBA: return m.srgb ? MTLPixelFormatBC2_RGBA_sRGB : tf;
+	case MTLPixelFormatBC2_RGBA_sRGB: return m.srgb ? tf : MTLPixelFormatBC2_RGBA;
+	case MTLPixelFormatBC3_RGBA: return m.srgb ? MTLPixelFormatBC3_RGBA_sRGB : tf;
+	case MTLPixelFormatBC3_RGBA_sRGB: return m.srgb ? tf : MTLPixelFormatBC3_RGBA;
+	case MTLPixelFormatBC7_RGBAUnorm: return m.srgb ? MTLPixelFormatBC7_RGBAUnorm_sRGB : tf;
+	case MTLPixelFormatBC7_RGBAUnorm_sRGB: return m.srgb ? tf : MTLPixelFormatBC7_RGBAUnorm;
 	default: return tf;
 	}
 }
@@ -238,6 +261,7 @@ bool isFloat32(MTLPixelFormat f) { return f == MTLPixelFormatR32Float || f == MT
 uint32_t bytesPerTexel(MTLPixelFormat f) {
 	switch (f) {
 	case MTLPixelFormatR8Unorm: case MTLPixelFormatR8Snorm: case MTLPixelFormatR8Uint: case MTLPixelFormatStencil8: return 1;
+	case MTLPixelFormatA1BGR5Unorm:
 	case MTLPixelFormatRG8Unorm: case MTLPixelFormatRG8Snorm: case MTLPixelFormatR16Float: case MTLPixelFormatR16Unorm:
 	case MTLPixelFormatR16Uint: case MTLPixelFormatDepth16Unorm: return 2;
 	case MTLPixelFormatRGBA16Float: case MTLPixelFormatRGBA16Unorm: case MTLPixelFormatRG32Float: case MTLPixelFormatDepth32Float_Stencil8: return 8;

@@ -72,9 +72,11 @@ f64 w2c_env_wasm_now_ms(struct w2c_env *host) { return timeMS(CLOCK_REALTIME); }
 f64 w2c_env_emscripten_date_now(struct w2c_env *host) { return timeMS(CLOCK_REALTIME); }
 u64 w2c_env_emscripten_get_heap_max(struct w2c_env *host) { wasm_rt_shared_memory_t *memory=w2c_env_memory(host);return memory->max_pages*memory->page_size; }
 static bool nativeMemoryGuard;
-static _Atomic uint64_t memoryBudgetClamps,memoryBudgetQueries;
+static _Atomic uint64_t memoryBudgetClamps,memoryBudgetEvictions,memoryBudgetQueries;
 uint64_t PGMemoryBudgetQueries(void){return atomic_load(&memoryBudgetQueries);}
+// Times the guard stopped streaming from growing, and times it asked the engine to evict.
 uint64_t PGMemoryBudgetClamps(void){return atomic_load(&memoryBudgetClamps);}
+uint64_t PGMemoryBudgetEvictions(void){return atomic_load(&memoryBudgetEvictions);}
 static uint64_t simulatedProcessLimit;
 static bool nativeProcessHeadroom(uint64_t *headroom){
  if(!nativeMemoryGuard)return false;
@@ -95,15 +97,14 @@ static bool nativeProcessHeadroom(uint64_t *headroom){
 uint64_t pg_streaming_available_memory(uint64_t engineAvailable){
  uint64_t available;
  if(!nativeProcessHeadroom(&available))return engineAvailable;
- uint64_t result=pg_streaming_headroom_budget(engineAvailable,available,384ull*1048576);
- if(result<engineAvailable)atomic_fetch_add(&memoryBudgetClamps,1);
+ uint64_t result=pg_streaming_headroom_budget(engineAvailable,available,384ull*1048576,256ull*1048576);
  return result;
 }
 uint64_t pg_streaming_resource_memory(uint64_t engineAvailable){
  uint64_t available;
  if(!nativeProcessHeadroom(&available))return engineAvailable;
- int64_t result=pg_streaming_resource_budget((int64_t)engineAvailable,available,384ull*1048576);
- if(result<(int64_t)engineAvailable)atomic_fetch_add(&memoryBudgetClamps,1);
+ int64_t result=pg_streaming_resource_budget((int64_t)engineAvailable,available,384ull*1048576,256ull*1048576);
+ if(result<(int64_t)engineAvailable&&result<=0)atomic_fetch_add(result<0?&memoryBudgetEvictions:&memoryBudgetClamps,1);
  return (uint64_t)result;
 }
 static u32 nativeEngineCores=2;
@@ -194,12 +195,13 @@ u32 w2c_env_wasm_httpfs_manifest_js(struct w2c_env *host, u64 address, u32 capac
   return (u32)length;
 }
 
+extern const char *PGSelectedGameLanguage(void);
 u32 w2c_env_emscripten_asm_const_int(struct w2c_env *host, u64 code, u64 sig, u64 arguments) {
   if (code == 7980558) {
     // Emscripten's language query is the only boot-time embedded JS expression.
     u64 destinationAddress = *(u64 *)pg_pointer(host, arguments, 8);
     u32 capacity = *(u32 *)pg_pointer(host, arguments + 8, 4);
-    const char *language = "en-US";
+    const char *language = PGSelectedGameLanguage();
     if (capacity) {
       char *destination = pg_pointer(host, destinationAddress, capacity);
       snprintf(destination, capacity, "%s", language);
@@ -374,6 +376,10 @@ PGControlHints PGReadControlHints(uint32_t touchContext){
  }
  uint32_t wheel=0;
  if(pg_context_u32(m,size,19480044,&wheel))hints.radioWheelOpen=wheel&1;
+ // The vehicle's model hash: entity archetype at +32, its name hash at +24 (as for the ped above).
+ uint64_t vehicle,vehicleInfo;uint32_t vehicleModel;
+ if(touchContext&&pg_context_u64(m,size,ped+5576,&vehicle)&&vehicle&&pg_context_u64(m,size,vehicle+32,&vehicleInfo)&&vehicleInfo&&
+    pg_context_u32(m,size,vehicleInfo+24,&vehicleModel))hints.vehicleModel=vehicleModel;
  return hints;
 }
 // The radio wheel reads INPUT_RADIO_WHEEL_UD/LR (332/333) from the main frontend control
@@ -489,6 +495,30 @@ void PGUpdateController(PGControllerState state, double elapsedSeconds) {
 }
 
 
+// Controller-swipe A/B reference: gestures are impulses, not held sticks.
+// UIKit and the engine sample at different times, so consume queued motion
+// only at the engine's ioPad update (never immediately clear on the UI tick).
+#define PG_CAMERA_SWIPE_SCALE 1024.0f
+static _Atomic int32_t pendingCameraSwipeX;
+static _Atomic int32_t pendingCameraSwipeY;
+void PGQueueCameraSwipe(float x, float y) {
+  if (!isfinite(x) || !isfinite(y)) return;
+  x = fmaxf(-1000, fminf(1000, x));
+  y = fmaxf(-1000, fminf(1000, y));
+  atomic_fetch_add(&pendingCameraSwipeX, (int32_t)lroundf(x * PG_CAMERA_SWIPE_SCALE));
+  atomic_fetch_add(&pendingCameraSwipeY, (int32_t)lroundf(y * PG_CAMERA_SWIPE_SCALE));
+}
+void PGClearCameraSwipe(void) {
+  atomic_exchange(&pendingCameraSwipeX, 0);
+  atomic_exchange(&pendingCameraSwipeY, 0);
+}
+static float pg_camera_swipe_axis(float delta, double elapsed) {
+  const float velocity = fabsf(delta) / fmaxf(1.f/240.f, fminf(1.f/15.f, (float)elapsed));
+  const float normalized = fminf(1.f, velocity / 1100.f);
+  if (normalized <= 0.025f) return 0;
+  return copysignf(0.245f + 0.755f * powf(normalized, 0.85f), delta);
+}
+
 // Virtual pad: packed so the engine thread reads one consistent sample.
 // bits 0-15 buttons, then LX LY RX RY L2 R2 bytes (0x80 = centred stick).
 static _Atomic uint64_t virtualPad = 0x0000808080800000ull;
@@ -527,12 +557,12 @@ static void pg_apply_targeting_mode(w2c_game *instance) {
   if (listeners) w2c_game_f36175(instance, listeners, 0, (u32)mode);
   char line[96]; snprintf(line, sizeof line, "Targeting mode set to %d.", mode); pg_log(line);
 }
-#if TARGET_OS_SIMULATOR
 u64 w2c_game_f100(w2c_game*, u64); // operator new
-u32 w2c_game_f81498(w2c_game*, u64, u64); // CMovieMgr::PreloadMovie
-void w2c_game_f81499(w2c_game*, u32); // CMovieMgr::Play
 u32 w2c_game_f58715(w2c_game*); // player_commands::CommandPlayerPedId
 void w2c_game_f50133(w2c_game*, u32, u64, u32, u32, u32); // entity_commands::CommandSetEntityCoordsNoOffset
+#if TARGET_OS_SIMULATOR
+u32 w2c_game_f81498(w2c_game*, u64, u64); // CMovieMgr::PreloadMovie
+void w2c_game_f81499(w2c_game*, u32); // CMovieMgr::Play
 // Test (PG_TEST_TELEPORT="x,y,z"): about 30 s in, moves the player there (a script vector is 3
 // floats 8 bytes apart).
 static void pg_test_teleport(w2c_game *instance) {
@@ -658,13 +688,58 @@ static void pg_test_loadscene_monitor(w2c_game *instance) {
   pg_log(line);
 }
 #endif
+// Sandbox on the GTA VI test map runs the GTA V map's scripts (NativeAssets.m), and they place
+// the player on GTA V coordinates (a story character's sandbox spawn, hospitals after a death),
+// which on the test map can be water or empty space. The first time the player exists, after any
+// jump of more than 300 m (a respawn) and whenever the player falls below the map, this moves them
+// to the test map's own start point (the one its test startup script uses). The player ped is
+// found the same way as in PGGameStatus; an entity's position is at +144.
+static void pg_keep_on_test_map(w2c_game *instance) {
+  static int frames;
+  static u64 vector;
+  static bool placed;
+  static float lastX, lastY;
+  if (configuredStartMode != 3 || ++frames % 15) return;
+  const uint8_t *m = (const uint8_t *)(void *)env.memory.data; uint64_t info, ped;
+  if (!pg_context_u64(m, env.memory.size, 20159720, &info) || !info || !pg_context_u64(m, env.memory.size, info + 8, &ped) || !ped) return;
+  const float *position = pg_pointer(&env, ped + 144, 12);
+  const float x = position[0], y = position[1], z = position[2];
+  const bool jumped = placed && (x - lastX) * (x - lastX) + (y - lastY) * (y - lastY) > 300.f * 300.f;
+  lastX = x; lastY = y;
+  if (placed && !jumped && !(z < -40.f)) return;
+  if (!vector) vector = w2c_game_f100(instance, 32);
+  float *v = pg_pointer(&env, vector, 24); v[0] = -234.f; v[2] = 838.f; v[4] = 38.f;
+  w2c_game_f50133(instance, w2c_game_f58715(instance), vector, 0, 0, 0);
+  lastX = v[0]; lastY = v[2];
+  char line[128]; snprintf(line, sizeof line, "GTA VI test map: moved the player from %.0f, %.0f, %.0f to the map's start point.", x, y, z); pg_log(line);
+  placed = true;
+}
 void pg_virtual_pad_apply(w2c_game *instance, uint64_t pad) {
   if (pad == 12840656) pg_apply_targeting_mode(instance);
+  if (pad == 12840656) pg_keep_on_test_map(instance);
 #if TARGET_OS_SIMULATOR
   if (pad == 12840656) { pg_test_teleport(instance); pg_test_tv(instance); pg_test_video(instance); pg_test_car(instance); pg_test_loadscene(instance); pg_test_loadscene_monitor(instance); }
 #endif
   if (pad != 12840656 || !atomic_load(&virtualPadActive)) return;
   uint64_t packed = atomic_load(&virtualPad);
+  // Use the last actual engine-sample interval (not display-link callbacks).
+  static _Thread_local double lastSwipePollMS;
+  const double nowMS = timeMS(CLOCK_MONOTONIC);
+  const double elapsed = lastSwipePollMS > 0 ? fmax(1.0/240.0, fmin(0.0667, (nowMS - lastSwipePollMS) / 1000.0)) : 1.0/60.0;
+  lastSwipePollMS = nowMS;
+  const float dx = (float)atomic_exchange(&pendingCameraSwipeX, 0) / PG_CAMERA_SWIPE_SCALE;
+  const float dy = (float)atomic_exchange(&pendingCameraSwipeY, 0) / PG_CAMERA_SWIPE_SCALE;
+  // The selection wheels own the stick even when a look finger is down.
+  const bool selectionWheel = (packed & ((1ull << 2) | (1ull << 14))) != 0;
+  if (!selectionWheel && (dx != 0 || dy != 0)) {
+    const float baseX = ((packed >> 32 & 255) - 127.5f) / 127.5f;
+    const float baseY = (127.5f - (packed >> 40 & 255)) / 127.5f;
+    const float lookX = fmaxf(-1, fminf(1, baseX + pg_camera_swipe_axis(dx, elapsed)));
+    const float lookY = fmaxf(-1, fminf(1, baseY + pg_camera_swipe_axis(dy, elapsed)));
+    packed = (packed & ~(0xffffull << 32)) |
+      (uint64_t)pg_pad_axis(lookX, false) << 32 |
+      (uint64_t)pg_pad_axis(lookY, true) << 40;
+  }
   uint8_t *base = pg_pointer(&env, pad, 136);
   _Atomic uint32_t *buttons = (_Atomic uint32_t *)(base + 12);
   uint32_t bits = (uint32_t)(packed & 0xffff);
@@ -699,6 +774,18 @@ void pg_movie_wait(w2c_game *instance, uint64_t movie) {
   }
   w2c_game_f135(instance, 1);
 }
+// GET_INDEX_OF_CURRENT_LEVEL for scripts (Scripts/prepare_level_index.py). PG_LEVEL_INDEX_OVERRIDE
+// answers a fixed index instead (test hook). Each new index the game reports is logged once.
+u32 pg_script_level_index(u32 index) {
+  static _Atomic int64_t lastLogged = -1;
+  const char *override = getenv("PG_LEVEL_INDEX_OVERRIDE");
+  u32 answer = override ? (u32)atoi(override) : index;
+  if (atomic_exchange(&lastLogged, (int64_t)index) != (int64_t)index) {
+    char line[96]; snprintf(line, sizeof line, "Scripts asked for the level index: %u (answered %u)", index, answer); pg_log(line);
+  }
+  return answer;
+}
+
 // HAS_STREAMED_TEXTURE_DICT_LOADED (Scripts/prepare_missing_txd.py): the scripts are newer than
 // the game files and some wait for a texture dictionary no archive has (Los Santos Customs waits
 // for "MPShopSale" before its menu). A name missing from the texture dictionary store can never
@@ -725,6 +812,30 @@ u32 pg_streamed_txd_loaded(w2c_game *instance, u64 name, u32 hash, u32 loaded) {
     pg_log(line);
   }
   return 1;
+}
+// datResourceMap fixup miss (Scripts/prepare_fixup_guard.py). The map: chunk table pointer at +0,
+// resource name at +16, entries {src, size | index << 56} (2 x u64) from +24, entry count (u8) at
+// +4120; the chunk table holds {.., src, dest} (3 x u64) per index. An address inside a chunk this
+// resource was placed in is a pointer fixed up twice: it is already right, so the delta is 0.
+u32 pg_fixup_already_placed(w2c_game *instance, u64 map, u64 address) {
+  (void)instance;
+  static _Atomic int logged;
+  uint64_t table = *(uint64_t *)pg_pointer(&env, map, 8), name = *(uint64_t *)pg_pointer(&env, map + 16, 8);
+  unsigned count = *(uint8_t *)pg_pointer(&env, map + 4120, 1);
+  for (unsigned k = 0; k < count; k++) {
+    const uint64_t *entry = pg_pointer(&env, map + 24 + 16ull * k, 16);
+    uint64_t size = entry[1] & 0x00FFFFFFFFFFFFFFull, index = entry[1] >> 56;
+    uint64_t dest = *(uint64_t *)pg_pointer(&env, table + 24 * index + 24, 8);
+    if (address >= dest && address - dest < size) {
+      if (atomic_fetch_add(&logged, 1) < 16) {
+        char line[200]; snprintf(line, sizeof line, "Resource \"%.64s\": pointer 0x%llx was already fixed up (chunk %u); kept it.",
+                                 name ? pg_string(&env, name) : "?", (unsigned long long)address, (unsigned)index);
+        pg_log(line);
+      }
+      return 1;
+    }
+  }
+  return 0;
 }
 // The core of IS_PAUSE_MENU_ACTIVE (f52482 -> f36254): either frontend flag.
 bool PGPauseMenuActive(void) {
@@ -899,9 +1010,15 @@ void PGStartEngine(const char *path, const char *filesRoot, PGLogCallback callba
 
 #include <execinfo.h>
 #include <mach-o/dyld.h>
+// The last indirect call that failed the fast check on this thread (Scripts/prepare_trap_context.py).
+static _Thread_local const char *indirectFunction;
+static _Thread_local uint32_t indirectIndex,indirectSize;
+void pg_note_call_indirect(const char *function,uint32_t index,uint32_t size){indirectFunction=function;indirectIndex=index;indirectSize=size;}
 void pg_record_trap(int code) {
   void *frames[20];int count=backtrace(frames,20);char line[160];
   snprintf(line,sizeof line,"Native trap %d; app image base %p",code,_dyld_get_image_header(0));pg_log(line);
+  // Names the engine function (w2c_game_fN) for an invalid indirect call, which native frames can't do.
+  if(code==WASM_RT_TRAP_CALL_INDIRECT&&indirectFunction){snprintf(line,sizeof line,"  indirect call in %s, table index %u of %u",indirectFunction,indirectIndex,indirectSize);pg_log(line);}
   for(int i=0;i<count;i++){snprintf(line,sizeof line,"  native frame %d: %p",i,frames[i]);pg_log(line);}
 }
 

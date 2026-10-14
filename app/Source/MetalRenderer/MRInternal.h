@@ -76,10 +76,12 @@ struct Texture : Object {
 	uint32_t dxgi = 0, bind = 0, dim = 2, width = 1, height = 1, depthOrLayers = 1, mips = 1, samples = 1;
 	bool isDepth = false, hasStencil = false, shared = false, floatNoFilter = false;
 	bool alphaView = false;		// A8 render target: stored as R8, sampled through a (0,0,0,R) swizzled view
-	int bcKind = 0;			// 1..7: block-compressed source decoded on the CPU (no BC on the GPU)
+	int bcKind = 0;			// 1..7: block-compressed source (decoded on the CPU unless bcNative)
+	bool bcNative = false;		// stored as a Metal BC format: uploads, copies and readbacks use the blocks as they are
 	bool bcSrgb = false;
 	uint64_t lastUse = 0;		// command buffer serial that last referenced it
 	std::unordered_map<uint64_t, id<MTLTexture>> views;
+	uint64_t gpuBytes = 0, bcGameBytes = 0;		// GPU allocation, and the compressed size the game budgets (for the report)
 	std::unordered_map<uint64_t, std::vector<uint8_t>> compressedShadow;		// "mip:layer" -> original blocks, for CPU readbacks
 	Texture *depthProxy = nullptr;		// r32float copy of a depth texture, for shaders that read it as float (if needed)
 	bool proxyDirty = true;
@@ -148,7 +150,14 @@ struct FormatInfo {
 	MTLPixelFormat alt = MTLPixelFormatInvalid;		// sRGB/linear twin (views)
 	int bc = 0;			// BC1..7 source
 	bool srgb = false, a8 = false;
+	bool bcNative = false;		// kept compressed on the GPU (gNativeBC), not decoded on the CPU
 };
+// The GPU samples BC1-7 itself (Apple silicon iPads and Macs; not iPhones): BC textures stay
+// compressed, 2 to 8 times smaller than decoded. Set once by the renderer before any texture.
+extern bool gNativeBC;
+// Decoded BC1 (non-sRGB) stored as 16-bit A1BGR5 instead of RGBA8: BC1 has only 1-bit alpha and
+// 5:6:5 colours, so this halves the largest share of decoded texture memory on iPhones.
+extern bool gPackedBC1;
 FormatInfo mapFormat(uint32_t dxgi, uint32_t bind);
 MTLPixelFormat viewFormat(uint32_t dxgi, MTLPixelFormat textureFormat);
 bool isDepthFormat(MTLPixelFormat f);

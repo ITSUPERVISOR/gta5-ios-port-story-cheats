@@ -45,7 +45,7 @@ final class DownloadBrowserViewController: UIViewController, WKNavigationDelegat
         webView.navigationDelegate = self
         webView.uiDelegate = self
         webView.allowsBackForwardNavigationGestures = true
-        hint.text = "Tap the page's download button. The app takes the download over by itself and unpacks it."
+        hint.text = AppLanguage.choose("Tap the page's download button. The app takes the download over by itself and unpacks it.")
         hint.font = Theme.body(13, .medium)
         hint.textColor = Theme.text
         hint.numberOfLines = 2
@@ -169,7 +169,7 @@ final class DownloadBrowserViewController: UIViewController, WKNavigationDelegat
     private func take(_ url: URL) {
         guard !caught else { return }
         caught = true
-        hint.text = "Download caught. Starting…"
+        hint.text = AppLanguage.choose("Download caught. Starting…")
         let referer = webView.url?.absoluteString
         webView.configuration.websiteDataStore.httpCookieStore.getAllCookies { [weak self] cookies in
             guard let self else { return }

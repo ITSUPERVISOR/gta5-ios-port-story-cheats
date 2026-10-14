@@ -91,7 +91,7 @@ enum GameFolder {
         defer { if scoped { picked.stopAccessingSecurityScopedResource() } }
         log("Folder picked: \(picked.path) (access granted: \(scoped), \(describeLocation(picked)))")
         guard FileManager.default.isReadableFile(atPath: picked.path) else {
-            return .refused("The app was not allowed to open that folder. Move your game folder to Files › On My iPhone › GTA V Port instead; the app finds it there by itself.")
+            return .refused(AppLanguage.choose("The app was not allowed to open that folder. Move your game folder to Files › On My iPhone › GTA V Port instead; the app finds it there by itself."))
         }
         let scan = GameFiles.scan(picked)
         archivesFound = scan.archives
@@ -116,7 +116,7 @@ enum GameFolder {
             log("Game folder accepted: data at \(subpath.isEmpty ? "(the picked folder)" : subpath), all \(best.fileCount) files checked")
             return .accepted(best)
         } catch {
-            return .refused("The app could not remember that folder: \(error.localizedDescription)")
+            return .refused(AppLanguage.interpolate(AppLanguage.choose("The app could not remember that folder: {arg0}"), [error.localizedDescription]))
         }
     }
 
@@ -183,9 +183,9 @@ enum GameFolder {
         let hasEngine = manager.fileExists(atPath: picked.appendingPathComponent("game.wasm").path)
             || manager.fileExists(atPath: picked.appendingPathComponent("8b0b5899ed/game.wasm").path)
         if name == "b" || name == "8b0b5899ed" || name == "shaders" || hasEngine {
-            return "You opened the \"\(name)\" folder. Go back up one or two levels and pick the folder that has both \"data\" and \"b\" inside, then tap Open there."
+            return AppLanguage.interpolate(AppLanguage.choose("You opened the \"{arg0}\" folder. Go back up one or two levels and pick the folder that has both \"data\" and \"b\" inside, then tap Open there."), [String(describing: name)])
         }
-        return "There is no game in \"\(name)\". Pick the folder that has your game in it (any folder above it works, even On My iPhone itself).\n\nEasiest: move your game folder into Files › On My iPhone › GTA V Port. The app finds it there by itself."
+        return AppLanguage.interpolate(AppLanguage.choose("There is no game in \"{arg0}\". Pick the folder that has your game in it (any folder above it works, even On My iPhone itself).\n\nEasiest: move your game folder into Files › On My iPhone › GTA V Port. The app finds it there by itself."), [name])
     }
 
     /// The name shown for a game folder: the folder holding data/, or data/'s own name.

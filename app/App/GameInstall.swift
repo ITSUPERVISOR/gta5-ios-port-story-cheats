@@ -39,7 +39,7 @@ final class GameInstallRun {
                       completion: @escaping (GameInstallResult) -> Void) -> GameInstallRun {
         let run = GameInstallRun()
         guard let manifest = EnginePaths.manifest else {
-            DispatchQueue.main.async { completion(.failure("The app's game file list is missing.")) }
+            DispatchQueue.main.async { completion(.failure(AppLanguage.choose("The app's game file list is missing."))) }
             return run
         }
         var options = GameInstaller.Options()
@@ -78,7 +78,7 @@ final class GameInstallRun {
                         return
                     }
                     var message = error.message
-                    if error.kind == .cancelled { message = "Cancelled. Files already unpacked are kept; starting again replaces them." }
+                    if error.kind == .cancelled { message = AppLanguage.choose("Cancelled. Files already unpacked are kept; starting again replaces them.") }
                     completion(.failure(message))
                 }
             })
@@ -104,23 +104,26 @@ final class GameInstallRun {
         var detail: [String] = []
         switch p.phase {
         case .checking:
-            return GameInstallUpdate(title: "Checking space and the archive…", detail: "", fraction: 0)
+            return GameInstallUpdate(title: AppLanguage.choose("Checking space and the archive…"), detail: "", fraction: 0)
         case .verifying:
-            return GameInstallUpdate(title: "Checking every file…", detail: "", fraction: 1)
+            return GameInstallUpdate(title: AppLanguage.choose("Checking every file…"), detail: "", fraction: 1)
         case .finished:
-            return GameInstallUpdate(title: "Done", detail: "", fraction: 1)
+            return GameInstallUpdate(title: AppLanguage.choose("Done"), detail: "", fraction: 1)
         case .downloading, .unpacking:
-            detail.append("\(size(p.extractedBytes)) of \(size(p.totalBytes)) unpacked · \(p.filesDone) of \(p.filesTotal) files")
+            detail.append(AppLanguage.interpolate(AppLanguage.choose("{arg0} of {arg1} unpacked · {arg2} of {arg3} files"), [size(p.extractedBytes), size(p.totalBytes), String(p.filesDone), String(p.filesTotal)]))
             if p.downloadedBytes > 0 {
-                let total = p.downloadTotalBytes.map { " of " + size($0) } ?? ""
-                detail.append("Downloaded \(size(p.downloadedBytes))\(total)\(p.bytesPerSecond.map { " · " + size(Int64($0)) + "/s" } ?? "")")
+                let speed = p.bytesPerSecond.map { " · " + size(Int64($0)) + "/s" } ?? ""
+                let downloaded = p.downloadTotalBytes.map { AppLanguage.interpolate(AppLanguage.choose("Downloaded {arg0} of {arg1}"), [size(p.downloadedBytes), size($0)]) }
+                    ?? AppLanguage.interpolate(AppLanguage.choose("Downloaded {arg0}"), [size(p.downloadedBytes)])
+                detail.append(downloaded + speed)
             }
             if let seconds = p.secondsRemaining, seconds.isFinite {
-                detail.append(seconds < 90 ? "About a minute left" : "About \(Int(seconds / 60)) minutes left")
+                detail.append(seconds < 90 ? AppLanguage.choose("About a minute left") : AppLanguage.interpolate(AppLanguage.choose("About {arg0} minutes left"), [String(Int(seconds / 60))]))
             }
-            if p.retries > 0 { detail.append("Connection dropped \(p.retries)× and resumed") }
+            if p.retries > 0 { detail.append(AppLanguage.interpolate(AppLanguage.choose("Connection dropped {arg0}× and resumed"), [String(p.retries)])) }
             if let file = p.currentFile { detail.append(file) }
-            let title = p.phase == .downloading ? "Downloading and unpacking… \(Int(p.fraction * 100))%" : "Unpacking… \(Int(p.fraction * 100))%"
+            let format = p.phase == .downloading ? AppLanguage.choose("Downloading and unpacking… {arg0}%") : AppLanguage.choose("Unpacking… {arg0}%")
+            let title = AppLanguage.interpolate(format, [String(Int(p.fraction * 100))])
             return GameInstallUpdate(title: title, detail: detail.joined(separator: "\n"), fraction: p.fraction)
         }
     }
@@ -147,7 +150,7 @@ final class GameInstallManager {
 
     func start(_ source: GameInstallSource, to destination: URL) {
         guard !isRunning else { return }
-        state = .running(GameInstallUpdate(title: "Starting…", detail: "", fraction: 0))
+        state = .running(GameInstallUpdate(title: AppLanguage.choose("Starting…"), detail: "", fraction: 0))
         post()
         run = GameInstallRun.start(source, to: destination, progress: { [weak self] update in
             self?.state = .running(update)

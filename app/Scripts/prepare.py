@@ -73,6 +73,10 @@ run('python3', 'Scripts/prepare_virtual_pad.py')
 run('python3', 'Scripts/prepare_movie_wait.py')
 run('python3', 'Scripts/prepare_missing_txd.py')
 run('python3', 'Scripts/prepare_unchecked_memory.py')
+run('python3', 'Scripts/prepare_trap_context.py')
+run('python3', 'Scripts/prepare_scenario_blockers.py')
+run('python3', 'Scripts/prepare_level_index.py')
+run('python3', 'Scripts/prepare_fixup_guard.py')
 # The BC texture decoder header (MIT): phones without BC texture support get decoded textures.
 bcdec = root / 'Tools/bcdec'
 if not bcdec.exists():

@@ -8,13 +8,13 @@ import os
 enum GraphicsPreset: Int, CaseIterable {
     case battery, performance, balanced, quality, ultra, max
 
-    var title: String { ["Battery", "Performance", "Balanced", "Quality", "Ultra", "Max"][rawValue] }
+    var title: String { [AppLanguage.choose("Battery"), AppLanguage.choose("Performance"), AppLanguage.choose("Balanced"), AppLanguage.choose("Quality"), AppLanguage.choose("Ultra"), AppLanguage.choose("Max")][rawValue] }
     /// Render height in pixels; width follows the screen's shape.
     var height: Int { [432, 540, 720, 900, 1080, 1290][rawValue] }
     var detail: String {
-        ["Lowest load, longest play time", "Today's tested setup for 6 GB iPhones", "Sharper image and shadows",
-         "Higher detail textures, effects and draw distance", "1080p with high shaders, shadows and reflections",
-         "Near-native resolution, high textures and full draw distance (newest Pro phones)"][rawValue]
+        [AppLanguage.choose("Lowest load, longest play time"), AppLanguage.choose("Today's tested setup for 6 GB iPhones"), AppLanguage.choose("Sharper image and shadows"),
+         AppLanguage.choose("Higher detail textures, effects and draw distance"), AppLanguage.choose("1080p with high shaders, shadows and reflections"),
+         AppLanguage.choose("Near-native resolution, high textures and full draw distance (newest Pro phones)")][rawValue]
     }
 
     /// Engine command-line options. Shader quality never goes below 1 (the
@@ -83,7 +83,40 @@ struct DeviceTier {
     var allowed: [GraphicsPreset] { GraphicsPreset.allCases }
     /// Presets shown with a warning because they may run out of memory or heat up.
     func risky(_ preset: GraphicsPreset) -> Bool { preset.rawValue > recommended.rawValue }
+    /// For the log (kept in English).
     var summary: String { "\(model) · \(physicalMemoryMB / 1024) GB · app limit \(memoryLimitMB) MB\(supportsBCTextures ? " · BC textures" : "")" }
+    /// The same line for Settings, in the app's language.
+    var displaySummary: String {
+        AppLanguage.interpolate(AppLanguage.choose("{arg0} · {arg1} GB · app limit {arg2} MB"), [model, String(physicalMemoryMB / 1024), String(memoryLimitMB)])
+            + (supportsBCTextures ? " · " + AppLanguage.choose("BC textures") : "")
+    }
+
+    /// Whether this install was signed with the increased memory limit (Apple grants it per
+    /// signature, so a sideloading tool can drop it). nil when it can't be read.
+    static let increasedMemoryGranted: Bool? = entitlement("com.apple.developer.kernel.increased-memory-limit")
+    /// For Settings and the log: is the extra memory actually in effect?
+    var increasedMemoryStatus: String {
+        switch Self.increasedMemoryGranted {
+        case true?: return AppLanguage.interpolate(AppLanguage.choose("Extra memory: on. This install has the increased memory limit, so the game may use up to {arg0} MB."), ["\(memoryLimitMB)"])
+        case false?: return AppLanguage.interpolate(AppLanguage.choose("Extra memory: off. This install was signed without the increased memory limit, so the game gets the normal {arg0} MB. Install the \"unlimited\" build with a paid developer account, or GetMoreRam on a free one, for more."), ["\(memoryLimitMB)"])
+        case nil: return AppLanguage.interpolate(AppLanguage.choose("Extra memory: unknown. The game may use up to {arg0} MB."), ["\(memoryLimitMB)"])
+        }
+    }
+
+    /// Reads a boolean entitlement of this app (SecTask is not public on iOS, so it is looked up at run time).
+    private static func entitlement(_ key: String) -> Bool? {
+        #if targetEnvironment(simulator)
+        return nil
+        #else
+        typealias Create = @convention(c) (CFAllocator?) -> Unmanaged<AnyObject>?
+        typealias Copy = @convention(c) (AnyObject, CFString, UnsafeMutablePointer<Unmanaged<CFError>?>?) -> Unmanaged<AnyObject>?
+        guard let handle = dlopen("/System/Library/Frameworks/Security.framework/Security", RTLD_LAZY),
+              let create = dlsym(handle, "SecTaskCreateFromSelf"), let copy = dlsym(handle, "SecTaskCopyValueForEntitlement"),
+              let task = unsafeBitCast(create, to: Create.self)(nil)?.takeRetainedValue() else { return nil }
+        let value = unsafeBitCast(copy, to: Copy.self)(task, key as CFString, nil)?.takeRetainedValue()
+        return (value as? Bool) ?? false
+        #endif
+    }
 }
 
 enum GraphicsConfiguration {

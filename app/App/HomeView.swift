@@ -6,9 +6,9 @@ import UIKit
 final class HomeView: UIView {
     enum FilesState { case ready, attention, problem, busy }
 
-    let playButton = Theme.primaryButton("Play", symbol: "play.fill")
-    let settingsButton = Theme.glassButton("Settings", symbol: "gearshape.fill")
-    let layoutButton = Theme.glassButton("Controls layout", symbol: "hand.tap.fill")
+    let playButton = Theme.primaryButton(AppLanguage.choose("Play"), symbol: "play.fill")
+    let settingsButton = Theme.glassButton(AppLanguage.choose("Settings"), symbol: "gearshape.fill")
+    let layoutButton = Theme.glassButton(AppLanguage.choose("Controls layout"), symbol: "hand.tap.fill")
     let preloadLabel = UILabel()
     let controllerLabel = UILabel()
     /// Taps on the game files card.
@@ -23,6 +23,9 @@ final class HomeView: UIView {
     private let filesSpinner = UIActivityIndicatorView(style: .medium)
     private var modeCards: [ModeCard] = []
     private let modeDetail = UILabel()
+    private let brandTitle = UILabel()
+    private let brandSubtitle = UILabel()
+    private let mapTitle = UILabel()
     /// Sandbox only: which map (it takes the place of the mode description).
     private let mapRow = UIStackView()
     private var mapChips: [UIButton] = []
@@ -39,14 +42,14 @@ final class HomeView: UIView {
         icon.clipsToBounds = true
         icon.widthAnchor.constraint(equalToConstant: 52).isActive = true
         icon.heightAnchor.constraint(equalToConstant: 52).isActive = true
-        let title = UILabel()
-        title.text = "GTA V Port"
+        let title = brandTitle
+        title.text = AppLanguage.choose("GTA V Port")
         title.font = Theme.display(30)
         title.textColor = Theme.text
         title.adjustsFontSizeToFitWidth = true
         title.minimumScaleFactor = 0.7
-        let subtitle = UILabel()
-        subtitle.text = "Fan project · plays your own game files · \(Theme.appVersion)"
+        let subtitle = brandSubtitle
+        subtitle.text = AppLanguage.choose("Fan project · plays your own game files") + " · \(Theme.appVersion)"
         subtitle.font = Theme.body(14, .medium)
         subtitle.textColor = Theme.secondaryText
         let titles = UIStackView(arrangedSubviews: [title, subtitle])
@@ -82,8 +85,8 @@ final class HomeView: UIView {
         }
         preloadLabel.isHidden = true
 
-        let mapLabel = UILabel()
-        mapLabel.text = "Map"
+        let mapLabel = mapTitle
+        mapLabel.text = AppLanguage.choose("Map")
         mapLabel.font = Theme.body(13, .semibold)
         mapLabel.textColor = Theme.secondaryText
         mapRow.addArrangedSubview(mapLabel)
@@ -160,6 +163,22 @@ final class HomeView: UIView {
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
+    /// Update language-specific titles in place without touching downloaded game files or layout.
+    func refreshLanguage() {
+        brandTitle.text = AppLanguage.choose("GTA V Port")
+        brandSubtitle.text = AppLanguage.choose("Fan project · plays your own game files") + " · \(Theme.appVersion)"
+        mapTitle.text = AppLanguage.choose("Map")
+        playButton.configuration?.title = AppLanguage.choose("Play")
+        settingsButton.configuration?.title = AppLanguage.choose("Settings")
+        layoutButton.configuration?.title = AppLanguage.choose("Controls layout")
+        for (index, card) in modeCards.enumerated() {
+            card.setTitle(GameMode.allCases[index].title)
+        }
+        for (i, chip) in mapChips.enumerated() {
+            chip.configuration?.title = GameSettings.sandboxMapTitles[i]
+        }
+    }
+
     private func buildFilesCard() {
         let panel = Theme.panel(cornerRadius: 16)
         panel.isUserInteractionEnabled = false
@@ -221,7 +240,7 @@ final class HomeView: UIView {
         }
         filesIcon.image = symbol.isEmpty ? nil : UIImage(systemName: symbol)
         filesIcon.tintColor = color
-        filesCard.accessibilityLabel = "Game files: \(title). \(detail)"
+        filesCard.accessibilityLabel = AppLanguage.interpolate(AppLanguage.choose("Game files: {arg0}. {arg1}"), [title, detail])
     }
 
     /// Marks the chosen mode (nil: none yet) and shows its description.
@@ -237,7 +256,7 @@ final class HomeView: UIView {
             chip.configuration?.background.strokeColor = selected ? Theme.accent : .clear
             chip.configuration?.background.strokeWidth = selected ? 1.5 : 0
             chip.accessibilityTraits = selected ? [.button, .selected] : .button
-            chip.accessibilityLabel = "Sandbox map: " + GameSettings.sandboxMapTitles[i]
+            chip.accessibilityLabel = AppLanguage.choose("Sandbox map: ") + GameSettings.sandboxMapTitles[i]
         }
     }
 
@@ -288,6 +307,11 @@ private final class ModeCard: UIControl {
         update()
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    func setTitle(_ title: String) {
+        label.text = title
+        accessibilityLabel = title
+    }
 
     override var isSelected: Bool { didSet { update() } }
     override var isEnabled: Bool { didSet { update() } }

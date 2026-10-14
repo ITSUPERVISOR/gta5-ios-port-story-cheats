@@ -26,20 +26,24 @@ enum GameFiles {
         var wrongSize: [Problem] { problems.filter { if case .wrongSize = $0.kind { return true }; return false } }
         var inICloud: [Problem] { problems.filter { if case .inICloud = $0.kind { return true }; return false } }
 
-        /// A short title and an explanation of what is wrong and what to do.
+        /// A short title and an explanation of what is wrong and what to do (shown to the player, so translated).
         var explanation: (title: String, message: String) {
-            if isComplete { return ("Game files OK", "All \(fileCount) game files are there and complete.") }
+            if isComplete { return (AppLanguage.choose("Game files OK"), AppLanguage.interpolate(AppLanguage.choose("All {arg0} game files are there and complete."), [String(fileCount)])) }
             var parts: [String] = []
             if !inICloud.isEmpty {
-                parts.append("\(Self.count(inICloud.count, "file is", "files are")) only in iCloud, not on this iPhone (for example \(inICloud[0].path)). The game can't read them from there: move the game folder to Files › On My iPhone › GTA V Port.")
+                parts.append(inICloud.count == 1
+                    ? AppLanguage.interpolate(AppLanguage.choose("1 file is only in iCloud, not on this iPhone (for example {arg0}). The game can't read them from there: move the game folder to Files › On My iPhone › GTA V Port."), [inICloud[0].path])
+                    : AppLanguage.interpolate(AppLanguage.choose("{arg0} files are only in iCloud, not on this iPhone (for example {arg1}). The game can't read them from there: move the game folder to Files › On My iPhone › GTA V Port."), [String(inICloud.count), inICloud[0].path]))
             }
             if !missing.isEmpty {
                 let bytes = missing.reduce(0) { $0 + $1.expected }
-                var text = "\(Self.count(missing.count, "file is", "files are")) missing (\(Self.size(bytes)) in all), for example \(Self.examples(missing))."
+                var text = missing.count == 1
+                    ? AppLanguage.interpolate(AppLanguage.choose("1 file is missing ({arg0} in all), for example {arg1}."), [Self.size(bytes), Self.examples(missing)])
+                    : AppLanguage.interpolate(AppLanguage.choose("{arg0} files are missing ({arg1} in all), for example {arg2}."), [String(missing.count), Self.size(bytes), Self.examples(missing)])
                 if missing.count == fileCount {
-                    text = "This folder has none of the game's files."
+                    text = AppLanguage.choose("This folder has none of the game's files.")
                 } else {
-                    text += " Unpacking or copying probably stopped before the end, most often because the iPhone ran out of storage. Free up space, delete this folder and unpack the game again."
+                    text += AppLanguage.choose(" Unpacking or copying probably stopped before the end, most often because the iPhone ran out of storage. Free up space, delete this folder and unpack the game again.")
                 }
                 parts.append(text)
             }
@@ -47,9 +51,11 @@ enum GameFiles {
                 let first = wrongSize[0]
                 var actual: UInt64 = 0
                 if case let .wrongSize(size) = first.kind { actual = size }
-                parts.append("\(Self.count(wrongSize.count, "file has", "files have")) the wrong size, for example \(first.path) (\(Self.size(actual)) instead of \(Self.size(first.expected))). These files are damaged, usually by an interrupted download or unpack, or come from a different version of the game. Delete the folder and unpack the game again.")
+                parts.append(wrongSize.count == 1
+                    ? AppLanguage.interpolate(AppLanguage.choose("1 file has the wrong size, for example {arg0} ({arg1} instead of {arg2}). These files are damaged, usually by an interrupted download or unpack, or come from a different version of the game. Delete the folder and unpack the game again."), [first.path, Self.size(actual), Self.size(first.expected)])
+                    : AppLanguage.interpolate(AppLanguage.choose("{arg0} files have the wrong size, for example {arg1} ({arg2} instead of {arg3}). These files are damaged, usually by an interrupted download or unpack, or come from a different version of the game. Delete the folder and unpack the game again."), [String(wrongSize.count), first.path, Self.size(actual), Self.size(first.expected)]))
             }
-            let title = !inICloud.isEmpty ? "Game files are in iCloud" : !wrongSize.isEmpty ? "Some game files are damaged" : "Some game files are missing"
+            let title = !inICloud.isEmpty ? AppLanguage.choose("Game files are in iCloud") : !wrongSize.isEmpty ? AppLanguage.choose("Some game files are damaged") : AppLanguage.choose("Some game files are missing")
             return (title, parts.joined(separator: "\n\n"))
         }
 
@@ -64,8 +70,9 @@ enum GameFiles {
             }.joined(separator: "\n")
         }
 
-        private static func count(_ n: Int, _ one: String, _ many: String) -> String { n == 1 ? "1 \(one)" : "\(n) \(many)" }
-        private static func examples(_ list: [Problem]) -> String { list.prefix(2).map(\.path).joined(separator: " and ") }
+        private static func examples(_ list: [Problem]) -> String {
+            list.count < 2 ? list[0].path : AppLanguage.interpolate(AppLanguage.choose("{arg0} and {arg1}"), [list[0].path, list[1].path])
+        }
         static func size(_ bytes: UInt64) -> String { ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file) }
     }
 

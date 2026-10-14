@@ -144,7 +144,14 @@ u32 w2c_env_0x5F_syscall_fcntl64(struct w2c_env *h,u32 fd,u32 command,u64 args){
 u32 w2c_env_0x5F_syscall_ioctl(struct w2c_env *h,u32 fd,u32 request,u64 args){return (u32)-59;}
 u32 w2c_env_0x5F_syscall_statfs64(struct w2c_env *h,u64 path,u64 size,u64 out) {
   char physical[PATH_MAX];if(pathAt(h,-100,path,physical,NULL)<0)return failure();
-  struct statvfs s;if(statvfs(physical,&s)<0)return failure();
+  // Free space of a folder that doesn't exist yet (the Replay editor asks before creating its
+  // folder) is the free space of its nearest existing parent.
+  struct statvfs s;
+  while(statvfs(physical,&s)<0){
+    if(errno!=ENOENT&&errno!=ENOTDIR)return failure();
+    char *slash=strrchr(physical,'/');if(!slash||slash==physical)return failure();
+    *slash=0;
+  }
   if(size<84)return (u32)-28;
   uint8_t *p=pg_pointer(h,out,size);memset(p,0,size);
   *(u32 *)(p+8)=s.f_bsize;*(u32 *)(p+72)=s.f_frsize;
